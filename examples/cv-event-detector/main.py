@@ -422,7 +422,7 @@ class ObjectCounterMarker(BatchMetadataOperator):
             frame_meta.append(display_meta)
             '''
 
-def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshold:float, gdino_rois:List[List[int]], frame_skip_interval:int, object_detection_threshold=3,streamname:str=None):
+def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshold:float, gdino_rois:List[List[int]], frame_skip_interval:int, object_detection_threshold=3,streamname:str=None, vss_server_url:str=None):
 
     # update the config file with the new prompt if it exists else use
     # the default prompt
@@ -506,12 +506,15 @@ def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshol
     pipeline.add("eventgenerator", "eventgenerator")
     print("CLIP_CACHE_PRE_EV_TIME", CLIP_CACHE_PRE_EV_TIME)
     print("CLIP_CACHE_POST_EV_TIME", CLIP_CACHE_POST_EV_TIME)
-    pipeline.add("nvdscacheevent", "cacheevent", {
+    cacheevent_props = {
         "output-folder": output_folder,
         "streamname": streamname,
         "clip-cache-pre-ev-time": CLIP_CACHE_PRE_EV_TIME,
         "clip-cache-post-ev-time": CLIP_CACHE_POST_EV_TIME
-    })
+    }
+    if vss_server_url:
+        cacheevent_props["vss-server-url"] = vss_server_url
+    pipeline.add("nvdscacheevent", "cacheevent", cacheevent_props)
     #pipeline.add("nvdscacheevent", "cacheevent")
     print("ENABLE_FILE_STREAMING_MODE=", ENABLE_FILE_STREAMING_MODE)
     if is_live:
@@ -822,7 +825,8 @@ async def add_stream(request: AddStreamRequest, response: Response):
                                                                         gdino_rois,
                                                                         pipeline_config.params.frame_skip_interval,
                                                                         pipeline_config.params.minimum_detection_threshold,
-                                                                        request.stream_name+"_"+str(stream_info.timestamp)))
+                                                                        request.stream_name+"_"+str(stream_info.timestamp),
+                                                                        pipeline_config.endpoint_url))
         stream_info.processing_state = "enabled"
         stream_info.process = process
         asset_map[asset_id] = stream_info
