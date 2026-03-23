@@ -629,7 +629,7 @@ def get_stream_id_choices():
         for s in streams:
             sid = s["stream_id"]
             sname = s.get("stream_name", "")
-            label = f"{sname}  {sid}"  if sname else sid
+            label = f"{sid}  {sname}" if sname else sid
             label += f"  [{s.get('processing_state', '')}]"
             if sid in watcher_ids:
                 label += "  🤖"
