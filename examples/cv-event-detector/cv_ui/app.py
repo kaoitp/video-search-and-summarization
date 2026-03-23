@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 API_URL = os.environ.get("NV_CV_EVENT_DETECTOR_API_URL", "http://localhost:23491")
 ALERTBRIDGE_URL = os.environ.get("NV_ALERTBRIDGE_URL", "http://alert-bridge:9080")
-DEFAULT_OUTPUT_FOLDER = os.environ.get("DEFAULT_OUTPUT_FOLDER", "/tmp/cv-output")
+DEFAULT_OUTPUT_FOLDER = os.environ.get("ALERT_REVIEW_MEDIA_BASE_DIR", "/tmp/cv-output")
 
 # ---------------------------------------------------------------------------
 # API helpers
@@ -40,7 +40,7 @@ ALERT_ENDPOINT = "/api/v1/alerts"
 
 def _build_event_payload(video_path, sensor_id, stream_name,
                           prompt, system_prompt,
-                          event_type, event_desc, severity,
+                          event_type, severity,
                           chunk_duration, num_frames, enable_reasoning,
                           do_verification):
     cv_meta = video_path.replace(".mp4", ".json")
@@ -82,7 +82,7 @@ def _build_event_payload(video_path, sensor_id, stream_name,
 
 def _watcher_loop(stream_id: str, output_folder: str, sensor_id: str,
                   stream_name: str, prompt: str, system_prompt: str,
-                  event_type: str, event_desc: str, severity: str,
+                  event_type: str, severity: str,
                   chunk_duration: int, num_frames: int, enable_reasoning: bool,
                   do_verification: bool,
                   stop_event: threading.Event, poll_sec: int = 5):
@@ -107,7 +107,7 @@ def _watcher_loop(stream_id: str, output_folder: str, sensor_id: str,
                 payload = _build_event_payload(
                     video_path, sensor_id, stream_name,
                     prompt, system_prompt,
-                    event_type, event_desc, severity,
+                    event_type, severity,
                     chunk_duration, num_frames, enable_reasoning,
                     do_verification,
                 )
@@ -143,7 +143,7 @@ def _log(stream_id: str, msg: str):
 
 def start_watcher(stream_id: str, output_folder: str, sensor_id: str,
                   stream_name: str, prompt: str, system_prompt: str,
-                  event_type: str, event_desc: str, severity: str,
+                  event_type: str, severity: str,
                   chunk_duration: int, num_frames: int, enable_reasoning: bool,
                   do_verification: bool,
                   poll_sec: int = 5):
@@ -151,7 +151,7 @@ def start_watcher(stream_id: str, output_folder: str, sensor_id: str,
     t = threading.Thread(
         target=_watcher_loop,
         args=(stream_id, output_folder, sensor_id, stream_name,
-              prompt, system_prompt, event_type, event_desc, severity,
+              prompt, system_prompt, event_type, severity,
               chunk_duration, num_frames, enable_reasoning,
               do_verification,
               stop_event, poll_sec),
@@ -276,12 +276,11 @@ def setup_pipeline_and_streams(
     name, endpoint_url, pipeline_type,
     min_clip, max_clip, frame_skip, min_detect,
     streams_df,
-    output_base,
     detection_classes, box_threshold,
     roi_x, roi_y, roi_w, roi_h,
     auto_review, poll_sec,
     vlm_prompt, vlm_system_prompt,
-    event_type, event_desc, severity,
+    event_type, severity,
     chunk_duration, num_frames, enable_reasoning, do_verification,
 ):
     # Step 1: Create pipeline
@@ -325,7 +324,7 @@ def setup_pipeline_and_streams(
 
         safe_name        = stream_name.replace(" ", "_")
         ts_tag           = datetime.now().strftime("%Y%m%d_%H%M%S")
-        stream_subfolder = os.path.join(output_base.strip(), f"{safe_name}_{ts_tag}")
+        stream_subfolder = os.path.join(DEFAULT_OUTPUT_FOLDER, f"{safe_name}_{ts_tag}")
 
         stream_payload = {
             "version": "1.0",
@@ -356,7 +355,6 @@ def setup_pipeline_and_streams(
                         prompt=vlm_prompt.strip(),
                         system_prompt=vlm_system_prompt.strip(),
                         event_type=event_type.strip() or "event",
-                        event_desc=event_desc.strip() or "Event detected",
                         severity=severity,
                         chunk_duration=int(chunk_duration),
                         num_frames=int(num_frames),
@@ -386,7 +384,7 @@ def add_stream(pipeline_id, stream_url, sensor_id, stream_name, output_folder,
                detection_classes, box_threshold,
                roi_x, roi_y, roi_w, roi_h,
                vlm_prompt, vlm_system_prompt,
-               event_type, event_desc, severity,
+               event_type, severity,
                chunk_duration, num_frames, enable_reasoning, do_verification,
                poll_sec, auto_review):
     if not pipeline_id:
@@ -439,7 +437,6 @@ def add_stream(pipeline_id, stream_url, sensor_id, stream_name, output_folder,
                 prompt=vlm_prompt.strip(),
                 system_prompt=vlm_system_prompt.strip(),
                 event_type=event_type.strip() or "event",
-                event_desc=event_desc.strip() or "Event detected",
                 severity=severity,
                 chunk_duration=int(chunk_duration),
                 num_frames=int(num_frames),
@@ -589,7 +586,7 @@ def list_clips(output_folder: str):
 def submit_clip_to_alertbridge(output_folder, clip_choice,
                                 sensor_id, stream_name,
                                 prompt, system_prompt,
-                                event_type, event_desc, severity,
+                                event_type, severity,
                                 chunk_duration, num_frames, enable_reasoning,
                                 do_verification):
     if not clip_choice:
@@ -599,7 +596,7 @@ def submit_clip_to_alertbridge(output_folder, clip_choice,
     video_path = os.path.join(output_folder.strip(), clip_choice)
     payload = _build_event_payload(video_path, sensor_id, stream_name,
                                    prompt, system_prompt,
-                                   event_type, event_desc, severity,
+                                   event_type, severity,
                                    chunk_duration, num_frames, enable_reasoning,
                                    do_verification)
     try:
@@ -611,7 +608,7 @@ def submit_clip_to_alertbridge(output_folder, clip_choice,
 
 
 def submit_all_clips(output_folder, sensor_id, stream_name,
-                     prompt, system_prompt, event_type, event_desc, severity,
+                     prompt, system_prompt, event_type, severity,
                      chunk_duration, num_frames, enable_reasoning, do_verification):
     if not prompt.strip():
         return "❌ กรุณาใส่ VLM Prompt ก่อน"
@@ -623,7 +620,7 @@ def submit_all_clips(output_folder, sensor_id, stream_name,
         video_path = os.path.join(output_folder.strip(), c + ".mp4")
         payload = _build_event_payload(video_path, sensor_id, stream_name,
                                        prompt, system_prompt,
-                                       event_type, event_desc, severity,
+                                       event_type, severity,
                                        chunk_duration, num_frames, enable_reasoning,
                                        do_verification)
         try:
@@ -677,9 +674,6 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                     t1_fskip     = gr.Slider(label="Frame Skip Interval", minimum=0, maximum=10, step=1, value=0)
                     t1_min_detect = gr.Slider(label="Min Object Detection Threshold", minimum=1, maximum=50, step=1, value=3)
 
-                    gr.Markdown("#### 📁 Output")
-                    t1_output_base = gr.Textbox(label="Output Base Folder", value=DEFAULT_OUTPUT_FOLDER)
-
                     gr.Markdown("#### 🔍 CV Detection (ใช้ร่วมกันทุก stream)")
                     t1_classes = gr.Textbox(
                         label="Detection Classes (หนึ่งคลาสต่อบรรทัด)",
@@ -732,7 +726,6 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                             label="Severity", choices=["LOW", "MEDIUM", "HIGH", "CRITICAL"],
                             value="MEDIUM", scale=1,
                         )
-                    t1_event_desc = gr.Textbox(label="Event Description", value="Event detected by CV pipeline")
                     gr.Markdown("#### VSS Params")
                     with gr.Row():
                         t1_chunk_dur   = gr.Number(label="Chunk Duration (วิ)", value=60, minimum=1, precision=0)
@@ -749,12 +742,12 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                 inputs=[
                     t1_name, t1_endpoint, t1_type,
                     t1_min_clip, t1_max_clip, t1_fskip, t1_min_detect,
-                    t1_streams_df, t1_output_base,
+                    t1_streams_df,
                     t1_classes, t1_threshold,
                     t1_roi_x, t1_roi_y, t1_roi_w, t1_roi_h,
                     t1_auto_review, t1_poll_sec,
                     t1_vlm_prompt, t1_vlm_sys_prompt,
-                    t1_event_type, t1_event_desc, t1_severity,
+                    t1_event_type, t1_severity,
                     t1_chunk_dur, t1_num_frames, t1_reasoning, t1_do_verification,
                 ],
                 outputs=t1_result,
@@ -865,7 +858,6 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                             choices=["LOW", "MEDIUM", "HIGH", "CRITICAL"],
                             value="MEDIUM", scale=1,
                         )
-                    t4_event_desc  = gr.Textbox(label="Event Description", value="Event detected by CV pipeline")
                     t4_sensor_id   = gr.Textbox(label="Sensor ID", value="sensor-1")
                     t4_stream_name = gr.Textbox(label="Stream Name", value="")
                     gr.Markdown("#### VSS Params")
@@ -889,7 +881,7 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                 inputs=[t4_output_folder, t4_clip_dd,
                         t4_sensor_id, t4_stream_name,
                         t4_prompt, t4_sys_prompt,
-                        t4_event_type, t4_event_desc, t4_severity,
+                        t4_event_type, t4_severity,
                         t4_chunk_dur, t4_num_frames, t4_reasoning, t4_do_verification],
                 outputs=t4_result,
             )
@@ -897,7 +889,7 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                 submit_all_clips,
                 inputs=[t4_output_folder, t4_sensor_id, t4_stream_name,
                         t4_prompt, t4_sys_prompt,
-                        t4_event_type, t4_event_desc, t4_severity,
+                        t4_event_type, t4_severity,
                         t4_chunk_dur, t4_num_frames, t4_reasoning, t4_do_verification],
                 outputs=t4_result,
             )
