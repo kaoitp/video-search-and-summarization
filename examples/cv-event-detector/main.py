@@ -691,6 +691,7 @@ class GetPipelineResponse(BaseModel):
 class StreamListItem(BaseModel):
     stream_id: str = Field(description="Unique stream identifier")
     pipeline_id: str = Field(description="Unique pipeline identifier")
+    stream_name: Optional[str] = Field(None, description="Name of the stream")
     processing_state: str = Field(description="Processing state of the stream (enabled/disabled)")
     timestamp: str = Field(description="Timestamp when stream was created (ISO format)")
 
@@ -1157,6 +1158,7 @@ async def get_streams():
             stream_item = StreamListItem(
                 stream_id=stream_info.stream_id,
                 pipeline_id=stream_info.pipeline_id,
+                stream_name=stream_info.stream_name,
                 processing_state=stream_info.processing_state,
                 timestamp=stream_info.timestamp
             )

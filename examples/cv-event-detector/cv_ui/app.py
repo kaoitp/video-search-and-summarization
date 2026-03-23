@@ -655,11 +655,23 @@ def stop_stream(stream_id):
         return "❌ กรุณาระบุ Stream ID"
     stop_watcher(sid)
     try:
-        r = _delete("/api/stream", {"stream_id": sid, "version": "1.0"})
+        r = requests.delete(f"{API_URL}/api/stream",
+                            json={"stream_id": sid, "version": "1.0"},
+                            timeout=60)
         data = r.json()
         if data.get("status") == "success":
-            return f"✅ หยุด Stream และ watcher สำเร็จ"
+            return "✅ หยุด Stream และ watcher สำเร็จ"
         return f"❌ {data.get('message', r.text)}"
+    except requests.exceptions.ReadTimeout:
+        # Server is still terminating the DeepStream process — verify by checking stream list
+        try:
+            streams = _get("/api/streams").json().get("streams", [])
+            still_exists = any(s["stream_id"] == sid for s in streams)
+            if not still_exists:
+                return "✅ หยุด Stream สำเร็จ (server ใช้เวลา terminate process นานกว่าปกติ)"
+            return "⚠️ Timeout — กรุณากด Refresh เพื่อตรวจสอบสถานะ stream"
+        except Exception:
+            return "⚠️ Timeout — กรุณากด Refresh เพื่อตรวจสอบสถานะ stream"
     except Exception as e:
         return f"❌ ข้อผิดพลาด: {e}"
 
