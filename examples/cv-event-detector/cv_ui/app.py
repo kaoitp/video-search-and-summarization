@@ -718,36 +718,71 @@ def health_check():
 # Manual VLM Review helpers (Tab 4)
 # ---------------------------------------------------------------------------
 
-def _read_info_txt(output_folder: str):
-    info_path = os.path.join(output_folder.strip(), "info.txt")
-    if not os.path.exists(info_path):
-        return []
-    with open(info_path, "r") as f:
-        return [l.strip() for l in f if l.strip()]
-
 
 def list_clips(output_folder: str):
+    """Scan base folder and all subfolders for info.txt, return all clips found."""
     if not output_folder.strip():
         return [], gr.update(choices=[]), "❌ กรุณาระบุ Output Folder"
-    clips = _read_info_txt(output_folder)
-    if not clips:
-        return [], gr.update(choices=[]), f"ไม่พบ info.txt หรือไม่มี clips ใน {output_folder}"
-    rows = [[c + ".mp4", c + ".json"] for c in clips]
-    choices = [c + ".mp4" for c in clips]
-    return rows, gr.update(choices=choices), f"พบ {len(clips)} clips"
+    base = output_folder.strip()
+    if not os.path.isdir(base):
+        return [], gr.update(choices=[]), f"❌ ไม่พบ folder: {base}"
+
+    rows, choices, folder_count = [], [], set()
+    for dirpath, _, filenames in os.walk(base):
+        if "info.txt" not in filenames:
+            continue
+        try:
+            with open(os.path.join(dirpath, "info.txt")) as f:
+                clips = [l.strip() for l in f if l.strip()]
+        except Exception:
+            continue
+        rel_dir = os.path.relpath(dirpath, base)
+        for c in clips:
+            full_mp4 = os.path.join(dirpath, c + ".mp4")
+            if not os.path.exists(full_mp4):
+                continue
+            display = os.path.join(rel_dir, c + ".mp4") if rel_dir != "." else c + ".mp4"
+            rows.append([display, rel_dir if rel_dir != "." else "(root)"])
+            choices.append(full_mp4)   # store full path as value
+            folder_count.add(dirpath)
+
+    if not rows:
+        return [], gr.update(choices=[]), f"ไม่พบ clips ใน {base} หรือ subfolders"
+    return rows, gr.update(choices=choices), f"พบ {len(rows)} clips จาก {len(folder_count)} folder"
 
 
-def submit_clip_to_alertbridge(output_folder, clip_choice,
-                                sensor_id, stream_name,
+def submit_clip_to_alertbridge(video_path, sensor_id, stream_name,
                                 prompt, system_prompt,
                                 event_type, severity,
                                 chunk_duration, num_frames, enable_reasoning,
                                 do_verification):
-    if not clip_choice:
+    if not video_path:
         return "❌ กรุณาเลือก clip ก่อน"
     if not prompt.strip():
         return "❌ กรุณาใส่ VLM Prompt ก่อน"
-    video_path = os.path.join(output_folder.strip(), clip_choice)
+    payload = _build_event_payload(video_path, sensor_id, stream_name,
+                                   prompt, system_prompt,
+                                   event_type, severity,
+                                   chunk_duration, num_frames, enable_reasoning,
+                                   do_verification)
+    try:
+        r = requests.post(f"{ALERTBRIDGE_URL}{ALERT_ENDPOINT}", json=payload, timeout=30)
+        ok = r.status_code in (200, 201, 202)
+        return f"{'✅' if ok else '❌'} HTTP {r.status_code}\n{r.text[:300]}"
+    except Exception as e:
+        return f"❌ ข้อผิดพลาด: {e}"
+
+
+def submit_uploaded_clip(uploaded_file, sensor_id, stream_name,
+                          prompt, system_prompt,
+                          event_type, severity,
+                          chunk_duration, num_frames, enable_reasoning,
+                          do_verification):
+    if not uploaded_file:
+        return "❌ กรุณา upload clip ก่อน"
+    if not prompt.strip():
+        return "❌ กรุณาใส่ VLM Prompt ก่อน"
+    video_path = uploaded_file if isinstance(uploaded_file, str) else uploaded_file.name
     payload = _build_event_payload(video_path, sensor_id, stream_name,
                                    prompt, system_prompt,
                                    event_type, severity,
@@ -766,12 +801,24 @@ def submit_all_clips(output_folder, sensor_id, stream_name,
                      chunk_duration, num_frames, enable_reasoning, do_verification):
     if not prompt.strip():
         return "❌ กรุณาใส่ VLM Prompt ก่อน"
-    clips = _read_info_txt(output_folder)
-    if not clips:
-        return f"❌ ไม่พบ clips ใน {output_folder}"
+    base = output_folder.strip()
+    all_videos = []
+    for dirpath, _, filenames in os.walk(base):
+        if "info.txt" not in filenames:
+            continue
+        try:
+            with open(os.path.join(dirpath, "info.txt")) as f:
+                clips = [l.strip() for l in f if l.strip()]
+        except Exception:
+            continue
+        for c in clips:
+            full_mp4 = os.path.join(dirpath, c + ".mp4")
+            if os.path.exists(full_mp4):
+                all_videos.append(full_mp4)
+    if not all_videos:
+        return f"❌ ไม่พบ clips ใน {base}"
     results = []
-    for c in clips:
-        video_path = os.path.join(output_folder.strip(), c + ".mp4")
+    for video_path in all_videos:
         payload = _build_event_payload(video_path, sensor_id, stream_name,
                                        prompt, system_prompt,
                                        event_type, severity,
@@ -1026,18 +1073,33 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                 f"`Alert-Bridge: {ALERTBRIDGE_URL}`"
             )
             with gr.Row():
+                # ── left: clip selection ──────────────────────────────────────
                 with gr.Column(scale=2):
-                    gr.Markdown("#### เลือก Output Folder และ Clip")
-                    t4_output_folder = gr.Textbox(label="Output Folder", value=DEFAULT_OUTPUT_FOLDER)
-                    btn_t4_list = gr.Button("🔍 โหลด Clips")
-                    t4_clip_msg = gr.Textbox(label="", lines=1, interactive=False, show_label=False)
-                    t4_clip_table = gr.Dataframe(
-                        headers=["Clip (.mp4)", "Metadata (.json)"],
-                        datatype=["str", "str"],
-                        interactive=False, elem_classes="stream-table",
-                    )
-                    t4_clip_dd = gr.Dropdown(label="เลือก Clip (สำหรับส่งทีละชิ้น)", choices=[])
+                    with gr.Tab("📁 จาก Folder"):
+                        gr.Markdown("สแกน folder และ subfolders ทั้งหมดที่มี `info.txt`")
+                        t4_output_folder = gr.Textbox(label="Base Folder", value=DEFAULT_OUTPUT_FOLDER)
+                        btn_t4_list = gr.Button("🔍 สแกน Clips")
+                        t4_clip_msg = gr.Textbox(label="", lines=1, interactive=False, show_label=False)
+                        t4_clip_table = gr.Dataframe(
+                            headers=["Clip (relative path)", "Folder"],
+                            datatype=["str", "str"],
+                            interactive=False, elem_classes="stream-table",
+                        )
+                        t4_clip_dd = gr.Dropdown(label="เลือก Clip (สำหรับส่งทีละชิ้น)", choices=[])
+                        with gr.Row():
+                            btn_t4_one = gr.Button("📤 ส่ง Clip ที่เลือก", variant="primary")
+                            btn_t4_all = gr.Button("📤 ส่งทุก Clip", variant="primary")
 
+                    with gr.Tab("⬆️ Upload Clip"):
+                        gr.Markdown("Upload ไฟล์ `.mp4` แล้วส่งตรงไปยัง Alert-Bridge")
+                        t4_upload = gr.File(
+                            label="เลือกไฟล์ .mp4",
+                            file_types=[".mp4"],
+                            type="filepath",
+                        )
+                        btn_t4_upload = gr.Button("📤 ส่ง Clip ที่ Upload", variant="primary")
+
+                # ── right: prompt & event settings ───────────────────────────
                 with gr.Column(scale=2):
                     gr.Markdown("#### VLM Prompt")
                     t4_prompt     = gr.Textbox(label="VLM Prompt *", lines=5)
@@ -1060,29 +1122,29 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                         t4_reasoning       = gr.Checkbox(label="Enable Reasoning", value=False)
                         t4_do_verification = gr.Checkbox(label="Do Verification", value=True)
 
-            with gr.Row():
-                btn_t4_one = gr.Button("📤 ส่ง Clip ที่เลือก", variant="primary")
-                btn_t4_all = gr.Button("📤 ส่งทุก Clip", variant="primary")
-
             t4_result = gr.Textbox(label="ผลลัพธ์", lines=8, elem_classes="status-box")
+
+            # shared inputs for prompt/event settings
+            _t4_common = [t4_sensor_id, t4_stream_name,
+                          t4_prompt, t4_sys_prompt,
+                          t4_event_type, t4_severity,
+                          t4_chunk_dur, t4_num_frames, t4_reasoning, t4_do_verification]
 
             btn_t4_list.click(list_clips, inputs=t4_output_folder,
                               outputs=[t4_clip_table, t4_clip_dd, t4_clip_msg])
             btn_t4_one.click(
                 submit_clip_to_alertbridge,
-                inputs=[t4_output_folder, t4_clip_dd,
-                        t4_sensor_id, t4_stream_name,
-                        t4_prompt, t4_sys_prompt,
-                        t4_event_type, t4_severity,
-                        t4_chunk_dur, t4_num_frames, t4_reasoning, t4_do_verification],
+                inputs=[t4_clip_dd] + _t4_common,
                 outputs=t4_result,
             )
             btn_t4_all.click(
                 submit_all_clips,
-                inputs=[t4_output_folder, t4_sensor_id, t4_stream_name,
-                        t4_prompt, t4_sys_prompt,
-                        t4_event_type, t4_severity,
-                        t4_chunk_dur, t4_num_frames, t4_reasoning, t4_do_verification],
+                inputs=[t4_output_folder] + _t4_common,
+                outputs=t4_result,
+            )
+            btn_t4_upload.click(
+                submit_uploaded_clip,
+                inputs=[t4_upload] + _t4_common,
                 outputs=t4_result,
             )
 
