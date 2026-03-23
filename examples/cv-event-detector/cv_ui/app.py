@@ -782,7 +782,21 @@ def submit_uploaded_clip(uploaded_file, sensor_id, stream_name,
         return "❌ กรุณา upload clip ก่อน"
     if not prompt.strip():
         return "❌ กรุณาใส่ VLM Prompt ก่อน"
-    video_path = uploaded_file if isinstance(uploaded_file, str) else uploaded_file.name
+
+    tmp_path = uploaded_file if isinstance(uploaded_file, str) else uploaded_file.name
+
+    # Copy to shared folder (ALERT_REVIEW_MEDIA_BASE_DIR) so Machine 2 can access it
+    import shutil
+    dest_dir = os.path.join(DEFAULT_OUTPUT_FOLDER, "manual_uploads")
+    os.makedirs(dest_dir, exist_ok=True)
+    ts_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{ts_tag}_{os.path.basename(tmp_path)}"
+    video_path = os.path.join(dest_dir, filename)
+    try:
+        shutil.copy2(tmp_path, video_path)
+    except Exception as e:
+        return f"❌ ไม่สามารถ copy ไฟล์ไปยัง shared folder ได้: {e}"
+
     payload = _build_event_payload(video_path, sensor_id, stream_name,
                                    prompt, system_prompt,
                                    event_type, severity,
