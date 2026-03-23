@@ -9,6 +9,7 @@ import json
 import uuid
 import threading
 import time
+import pandas as pd
 from datetime import datetime, timezone
 
 API_URL = os.environ.get("NV_CV_EVENT_DETECTOR_API_URL", "http://localhost:23491")
@@ -266,6 +267,116 @@ def get_pipelines_table():
         return rows
     except Exception:
         return []
+
+# ---------------------------------------------------------------------------
+# Combined setup: create pipeline + add all streams in one call
+# ---------------------------------------------------------------------------
+
+def setup_pipeline_and_streams(
+    name, endpoint_url, pipeline_type,
+    min_clip, max_clip, frame_skip, min_detect,
+    streams_df,
+    output_base,
+    detection_classes, box_threshold,
+    roi_x, roi_y, roi_w, roi_h,
+    auto_review, poll_sec,
+    vlm_prompt, vlm_system_prompt,
+    event_type, event_desc, severity,
+    chunk_duration, num_frames, enable_reasoning, do_verification,
+):
+    # Step 1: Create pipeline
+    pipeline_payload = {
+        "name": name.strip(),
+        "endpoint_url": endpoint_url.strip() if endpoint_url.strip() else None,
+        "type": pipeline_type.strip(),
+        "params": {
+            "min_clip_duration": int(min_clip),
+            "max_clip_duration": int(max_clip),
+            "frame_skip_interval": int(frame_skip),
+            "minimum_detection_threshold": int(min_detect),
+        },
+    }
+    try:
+        r = _post("/api/pipeline", pipeline_payload)
+        data = r.json()
+        if data.get("status") != "success":
+            return f"❌ สร้าง Pipeline ล้มเหลว: {data.get('message', r.text)}"
+        pipeline_id = data["id"]
+    except Exception as e:
+        return f"❌ สร้าง Pipeline ล้มเหลว: {e}"
+
+    lines = [f"✅ Pipeline สร้างสำเร็จ\nID: {pipeline_id}\n"]
+
+    # Step 2: Shared CV params
+    classes = [c.strip() for c in detection_classes.strip().splitlines() if c.strip()]
+    cv_prompt = " . ".join(classes) if classes else None
+    has_roi = int(roi_w) > 0 and int(roi_h) > 0
+    gdino_rois = [[int(roi_x), int(roi_y), int(roi_w), int(roi_h)]] if has_roi else [[]]
+
+    # Step 3: Add each stream row
+    rows_iter = [dict(row) for _, row in streams_df.iterrows()] if isinstance(streams_df, pd.DataFrame) else streams_df
+    added = 0
+    for row in rows_iter:
+        stream_url = str(row.get("Stream URL", "")).strip()
+        if not stream_url:
+            continue
+        stream_name = str(row.get("Stream Name", "stream")).strip() or "stream"
+        sensor_id   = str(row.get("Sensor ID",   "sensor-1")).strip() or "sensor-1"
+
+        safe_name        = stream_name.replace(" ", "_")
+        ts_tag           = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stream_subfolder = os.path.join(output_base.strip(), f"{safe_name}_{ts_tag}")
+
+        stream_payload = {
+            "version": "1.0",
+            "stream_url": stream_url,
+            "pipeline_id": pipeline_id,
+            "output_folder": stream_subfolder,
+            "sensor_id": sensor_id,
+            "stream_name": safe_name,
+            "processing_state": "enabled",
+            "cv_params": {
+                "gdinoprompt": cv_prompt,
+                "gdinothreshold": float(box_threshold),
+                "gdino_rois": gdino_rois,
+            },
+        }
+        try:
+            r = _post("/api/addstream", stream_payload)
+            d = r.json()
+            if d.get("status") == "success":
+                sid = d["stream_id"]
+                watcher_note = ""
+                if auto_review and vlm_prompt.strip():
+                    start_watcher(
+                        stream_id=sid,
+                        output_folder=stream_subfolder,
+                        sensor_id=sensor_id,
+                        stream_name=safe_name,
+                        prompt=vlm_prompt.strip(),
+                        system_prompt=vlm_system_prompt.strip(),
+                        event_type=event_type.strip() or "event",
+                        event_desc=event_desc.strip() or "Event detected",
+                        severity=severity,
+                        chunk_duration=int(chunk_duration),
+                        num_frames=int(num_frames),
+                        enable_reasoning=bool(enable_reasoning),
+                        do_verification=bool(do_verification),
+                        poll_sec=int(poll_sec),
+                    )
+                    watcher_note = "  🤖 Auto-Review เปิดแล้ว"
+                elif auto_review:
+                    watcher_note = "  ⚠️ Auto-Review: ต้องใส่ VLM Prompt"
+                lines.append(f"  ✅ [{stream_name}] {sid}{watcher_note}")
+                added += 1
+            else:
+                lines.append(f"  ❌ [{stream_name}] {d.get('message', r.text)}")
+        except Exception as e:
+            lines.append(f"  ❌ [{stream_name}] {e}")
+
+    lines.append(f"\nสรุป: เพิ่ม {added} stream สำเร็จ")
+    return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # Stream helpers
@@ -548,30 +659,114 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
     # ═══════════════════════════════════════════════════════════════════════════
     with gr.Tabs():
 
-        # ── TAB 1: Pipeline Setup ─────────────────────────────────────────────
-        with gr.TabItem("⚙️ จัดการ Pipeline"):
-            gr.Markdown("### สร้าง Pipeline ใหม่")
+        # ── TAB 1: Setup Pipeline & Streams (combined) ────────────────────────
+        with gr.TabItem("🚀 ตั้งค่า Pipeline & Streams"):
+            gr.Markdown(
+                "### ระบุกล้องทั้งหมด แล้วกดปุ่มเดียว — ระบบจะสร้าง Pipeline และเพิ่มทุก Stream ให้\n"
+                "> หากต้องการแก้ไข: ลบ Pipeline เก่าออกก่อน (ส่วน **ลบ Pipeline เก่า** ด้านล่าง) แล้วกรอกใหม่"
+            )
             with gr.Row():
-                with gr.Column():
-                    t1_name     = gr.Textbox(label="ชื่อ Pipeline", value="cv-pipeline")
-                    t1_type     = gr.Textbox(label="ประเภท (type)", value="object_detection")
-                    t1_endpoint = gr.Textbox(label="Alert Bridge URL", value=ALERTBRIDGE_URL)
-                with gr.Column():
-                    t1_min_clip   = gr.Number(label="Min Clip Duration (วินาที)", value=5, minimum=1)
-                    t1_max_clip   = gr.Number(label="Max Clip Duration (วินาที)", value=60, minimum=1)
-                    t1_fskip      = gr.Slider(label="Frame Skip Interval", minimum=0, maximum=10, step=1, value=0)
+                # ── col 1: Pipeline config ────────────────────────────────────
+                with gr.Column(scale=1):
+                    gr.Markdown("#### ⚙️ Pipeline Config")
+                    t1_name      = gr.Textbox(label="ชื่อ Pipeline", value="cv-pipeline")
+                    t1_type      = gr.Textbox(label="ประเภท (type)", value="object_detection")
+                    t1_endpoint  = gr.Textbox(label="Alert Bridge URL", value=ALERTBRIDGE_URL)
+                    t1_min_clip  = gr.Number(label="Min Clip Duration (วิ)", value=5, minimum=1)
+                    t1_max_clip  = gr.Number(label="Max Clip Duration (วิ)", value=60, minimum=1)
+                    t1_fskip     = gr.Slider(label="Frame Skip Interval", minimum=0, maximum=10, step=1, value=0)
                     t1_min_detect = gr.Slider(label="Min Object Detection Threshold", minimum=1, maximum=50, step=1, value=3)
 
-            btn_create_pipe = gr.Button("➕ สร้าง Pipeline", variant="primary")
-            t1_result = gr.Textbox(label="ผลลัพธ์", lines=3, elem_classes="status-box")
+                    gr.Markdown("#### 📁 Output")
+                    t1_output_base = gr.Textbox(label="Output Base Folder", value=DEFAULT_OUTPUT_FOLDER)
+
+                    gr.Markdown("#### 🔍 CV Detection (ใช้ร่วมกันทุก stream)")
+                    t1_classes = gr.Textbox(
+                        label="Detection Classes (หนึ่งคลาสต่อบรรทัด)",
+                        lines=3, placeholder="person\ncar\ntruck", value="person",
+                    )
+                    t1_threshold = gr.Slider(label="Box Threshold", minimum=0.1, maximum=1.0, step=0.05, value=0.3)
+                    gr.Markdown("#### ROI — เว้นว่างถ้าใช้ทั้งภาพ")
+                    with gr.Row():
+                        t1_roi_x = gr.Number(label="X", value=0, minimum=0, precision=0)
+                        t1_roi_y = gr.Number(label="Y", value=0, minimum=0, precision=0)
+                        t1_roi_w = gr.Number(label="W (0=ทั้งภาพ)", value=0, minimum=0, precision=0)
+                        t1_roi_h = gr.Number(label="H (0=ทั้งภาพ)", value=0, minimum=0, precision=0)
+
+                # ── col 2: Stream table ───────────────────────────────────────
+                with gr.Column(scale=1):
+                    gr.Markdown("#### 📷 รายการ Streams")
+                    t1_streams_df = gr.Dataframe(
+                        headers=["Stream URL", "Stream Name", "Sensor ID"],
+                        datatype=["str", "str", "str"],
+                        row_count=(3, "dynamic"),
+                        col_count=(3, "fixed"),
+                        interactive=True,
+                        label="ระบุ stream ทุกตัว (เพิ่มแถวได้ตามต้องการ)",
+                        value=[
+                            ["", "cam-1", "sensor-1"],
+                            ["", "cam-2", "sensor-2"],
+                            ["", "cam-3", "sensor-3"],
+                        ],
+                    )
+
+                # ── col 3: VLM / Auto-Review (ใช้ร่วมกันทุก stream) ──────────
+                with gr.Column(scale=1):
+                    gr.Markdown("#### 🤖 Auto VLM Review (ใช้ร่วมกันทุก stream)")
+                    t1_auto_review = gr.Checkbox(
+                        label="เปิด Auto-Review (ส่ง clip ให้ Alert-Bridge อัตโนมัติ)", value=True)
+                    t1_poll_sec = gr.Slider(
+                        label="Poll Interval (วินาที)", minimum=3, maximum=60, step=1, value=5)
+                    t1_vlm_prompt = gr.Textbox(
+                        label="VLM Prompt *", lines=5,
+                        placeholder="e.g. Does the video show signs of overcrowding?",
+                    )
+                    t1_vlm_sys_prompt = gr.Textbox(
+                        label="System Prompt (ไม่บังคับ)", lines=2,
+                        placeholder="e.g. You are a warehouse safety monitoring system.",
+                    )
+                    gr.Markdown("#### Event Info")
+                    with gr.Row():
+                        t1_event_type = gr.Textbox(label="Event Type", value="over_crowding", scale=2)
+                        t1_severity   = gr.Dropdown(
+                            label="Severity", choices=["LOW", "MEDIUM", "HIGH", "CRITICAL"],
+                            value="MEDIUM", scale=1,
+                        )
+                    t1_event_desc = gr.Textbox(label="Event Description", value="Event detected by CV pipeline")
+                    gr.Markdown("#### VSS Params")
+                    with gr.Row():
+                        t1_chunk_dur   = gr.Number(label="Chunk Duration (วิ)", value=60, minimum=1, precision=0)
+                        t1_num_frames  = gr.Number(label="Frames per Chunk", value=8, minimum=1, precision=0)
+                    with gr.Row():
+                        t1_reasoning        = gr.Checkbox(label="Enable Reasoning", value=False)
+                        t1_do_verification  = gr.Checkbox(label="Do Verification", value=True)
+
+            btn_setup = gr.Button("🚀 สร้าง Pipeline & เพิ่ม Streams ทั้งหมด", variant="primary", size="lg")
+            t1_result = gr.Textbox(label="ผลลัพธ์", lines=8, elem_classes="status-box")
+
+            btn_setup.click(
+                setup_pipeline_and_streams,
+                inputs=[
+                    t1_name, t1_endpoint, t1_type,
+                    t1_min_clip, t1_max_clip, t1_fskip, t1_min_detect,
+                    t1_streams_df, t1_output_base,
+                    t1_classes, t1_threshold,
+                    t1_roi_x, t1_roi_y, t1_roi_w, t1_roi_h,
+                    t1_auto_review, t1_poll_sec,
+                    t1_vlm_prompt, t1_vlm_sys_prompt,
+                    t1_event_type, t1_event_desc, t1_severity,
+                    t1_chunk_dur, t1_num_frames, t1_reasoning, t1_do_verification,
+                ],
+                outputs=t1_result,
+            )
 
             gr.Markdown("---")
-            gr.Markdown("### Pipeline ที่มีอยู่")
+            gr.Markdown("### 🗑️ ลบ Pipeline เก่า (ก่อนแก้ไข)")
+            gr.Markdown("ต้องลบ Pipeline เก่าออกก่อน แล้วค่อยสร้างใหม่ด้านบน")
             with gr.Row():
-                btn_refresh_pipes = gr.Button("🔄 โหลดใหม่")
+                btn_refresh_pipes = gr.Button("🔄 โหลด Pipeline")
                 t1_del_id = gr.Textbox(label="Pipeline ID ที่จะลบ", scale=3)
                 btn_del_pipe = gr.Button("🗑️ ลบ Pipeline", variant="stop")
-
             t1_pipe_table = gr.Dataframe(
                 headers=["Pipeline ID", "Config", "Created At"],
                 datatype=["str", "str", "str"],
@@ -580,116 +775,16 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                 value=get_pipelines_table,
                 every=60,
             )
-            t1_pipe_result = gr.Textbox(label="ผลลัพธ์", lines=2, elem_classes="status-box")
-            _pipeline_dd_shared = gr.State(value=None)
+            t1_pipe_result = gr.Textbox(label="ผลการลบ", lines=2, elem_classes="status-box")
 
-            btn_create_pipe.click(
-                create_pipeline,
-                inputs=[t1_name, t1_endpoint, t1_type,
-                        t1_min_clip, t1_max_clip, t1_fskip, t1_min_detect],
-                outputs=[t1_result, _pipeline_dd_shared],
-            ).then(get_pipelines_table, outputs=t1_pipe_table)
             btn_refresh_pipes.click(get_pipelines_table, outputs=t1_pipe_table)
             btn_del_pipe.click(
                 delete_pipeline,
                 inputs=[t1_del_id],
-                outputs=[t1_pipe_result, _pipeline_dd_shared],
+                outputs=[t1_pipe_result, gr.State()],
             ).then(get_pipelines_table, outputs=t1_pipe_table)
 
-        # ── TAB 2: Add Stream ─────────────────────────────────────────────────
-        with gr.TabItem("➕ เพิ่ม Stream"):
-            gr.Markdown(
-                "กรอกข้อมูล Stream แล้วกด **เพิ่ม Stream** ได้เรื่อยๆ "
-                "ฟอร์มจะ**ไม่ล้างค่า**หลัง submit เพื่อให้เพิ่มหลาย stream ได้สะดวก"
-            )
-            with gr.Row():
-                # ── left: stream identity ─────────────────────────────────────
-                with gr.Column(scale=2):
-                    gr.Markdown("#### Stream Source")
-                    t2_pipeline = gr.Dropdown(
-                        label="Pipeline",
-                        choices=_pipeline_choices()[0],
-                        allow_custom_value=True,
-                    )
-                    btn_t2_refresh_pipe = gr.Button("🔄 โหลด Pipeline")
-                    t2_stream_url = gr.Textbox(
-                        label="Stream URL",
-                        placeholder="rtsp://192.168.1.1:554/stream  หรือ  file:///tmp/video.mp4",
-                    )
-                    t2_stream_name   = gr.Textbox(label="Stream Name", value="cam-1")
-                    t2_sensor_id     = gr.Textbox(label="Sensor ID", value="sensor-1")
-                    t2_output_folder = gr.Textbox(label="Output Base Folder", value=DEFAULT_OUTPUT_FOLDER)
-
-                    gr.Markdown("#### CV Detection Parameters")
-                    t2_classes = gr.Textbox(
-                        label="Detection Classes (หนึ่งคลาสต่อบรรทัด)",
-                        lines=4,
-                        placeholder="person\ncar\ntruck",
-                        value="person",
-                    )
-                    t2_threshold = gr.Slider(
-                        label="Box Threshold", minimum=0.1, maximum=1.0, step=0.05, value=0.3)
-                    gr.Markdown("#### ROI — เว้นว่างถ้าใช้ทั้งภาพ")
-                    with gr.Row():
-                        t2_roi_x = gr.Number(label="X", value=0, minimum=0, precision=0)
-                        t2_roi_y = gr.Number(label="Y", value=0, minimum=0, precision=0)
-                        t2_roi_w = gr.Number(label="Width (0=ทั้งภาพ)", value=0, minimum=0, precision=0)
-                        t2_roi_h = gr.Number(label="Height (0=ทั้งภาพ)", value=0, minimum=0, precision=0)
-
-                # ── right: VLM auto-review ────────────────────────────────────
-                with gr.Column(scale=2):
-                    gr.Markdown("#### 🤖 Auto VLM Review")
-                    t2_auto_review = gr.Checkbox(
-                        label="เปิด Auto-Review (ส่ง clip ให้ Alert-Bridge อัตโนมัติ)",
-                        value=True,
-                    )
-                    t2_poll_sec = gr.Slider(
-                        label="Poll Interval (วินาที)", minimum=3, maximum=60, step=1, value=5)
-                    t2_vlm_prompt = gr.Textbox(
-                        label="VLM Prompt *",
-                        lines=5,
-                        placeholder="e.g. Does the video show signs of overcrowding? Describe what you see.",
-                    )
-                    t2_vlm_sys_prompt = gr.Textbox(
-                        label="System Prompt (ไม่บังคับ)",
-                        lines=2,
-                        placeholder="e.g. You are a warehouse safety monitoring system.",
-                    )
-                    gr.Markdown("#### Event Info")
-                    with gr.Row():
-                        t2_event_type = gr.Textbox(label="Event Type", value="over_crowding", scale=2)
-                        t2_severity   = gr.Dropdown(
-                            label="Severity",
-                            choices=["LOW", "MEDIUM", "HIGH", "CRITICAL"],
-                            value="MEDIUM", scale=1,
-                        )
-                    t2_event_desc = gr.Textbox(
-                        label="Event Description", value="Event detected by CV pipeline")
-                    gr.Markdown("#### VSS Params")
-                    with gr.Row():
-                        t2_chunk_dur      = gr.Number(label="Chunk Duration (วิ)", value=60, minimum=1, precision=0)
-                        t2_num_frames     = gr.Number(label="Frames per Chunk", value=8, minimum=1, precision=0)
-                    with gr.Row():
-                        t2_reasoning      = gr.Checkbox(label="Enable Reasoning", value=False)
-                        t2_do_verification = gr.Checkbox(label="Do Verification (แสดง Yes/No alert result)", value=True)
-
-            btn_add_stream = gr.Button("➕ เพิ่ม Stream", variant="primary", size="lg")
-            t2_result = gr.Textbox(label="ผลลัพธ์", lines=6, elem_classes="status-box")
-
-            btn_t2_refresh_pipe.click(refresh_pipeline_dropdown, outputs=t2_pipeline)
-            btn_add_stream.click(
-                add_stream,
-                inputs=[t2_pipeline, t2_stream_url, t2_sensor_id, t2_stream_name,
-                        t2_output_folder, t2_classes, t2_threshold,
-                        t2_roi_x, t2_roi_y, t2_roi_w, t2_roi_h,
-                        t2_vlm_prompt, t2_vlm_sys_prompt,
-                        t2_event_type, t2_event_desc, t2_severity,
-                        t2_chunk_dur, t2_num_frames, t2_reasoning, t2_do_verification,
-                        t2_poll_sec, t2_auto_review],
-                outputs=t2_result,
-            )
-
-        # ── TAB 3: Stream Manager ─────────────────────────────────────────────
+        # ── TAB 2: Stream Manager ─────────────────────────────────────────────
         with gr.TabItem("📋 จัดการ Stream"):
             gr.Markdown("### รายการ Stream ทั้งหมด  (🤖 = มี Auto-Review เปิดอยู่)")
             with gr.Row():
@@ -807,11 +902,6 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                 outputs=t4_result,
             )
 
-    _pipeline_dd_shared.change(
-        lambda v: gr.update(value=v) if v else gr.update(),
-        inputs=_pipeline_dd_shared,
-        outputs=t2_pipeline,
-    )
 
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
