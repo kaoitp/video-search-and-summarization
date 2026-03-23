@@ -75,18 +75,19 @@ services:
 
   cv-ui:
     build: ./cv_ui
+    runtime: nvidia
     networks:
       - cv-local-network
     volumes:
       # Same NFS mount — UI can show output folder path correctly
       - "${ALERT_REVIEW_MEDIA_BASE_DIR}:${ALERT_REVIEW_MEDIA_BASE_DIR}"
     environment:
-      - NVIDIA_VISIBLE_DEVICES="${NVIDIA_VISIBLE_DEVICES:-}"
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       # cv-detector is on the same machine — use service name
       - NV_CV_EVENT_DETECTOR_API_URL=${NV_CV_EVENT_DETECTOR_API_URL:-http://nv-cv-event-detector:${NV_CV_EVENT_DETECTOR_API_PORT:-23491}}
       # alert-bridge is on Machine 2 — use real IP
       - NV_ALERTBRIDGE_URL=http://${EVENT_REVIEWER_IP}:9080
-      - DEFAULT_OUTPUT_FOLDER=${ALERT_REVIEW_MEDIA_BASE_DIR}
+      - ALERT_REVIEW_MEDIA_BASE_DIR=${ALERT_REVIEW_MEDIA_BASE_DIR}
       - CV_UI_PORT=7862
     ports:
       - "7862:7862"

@@ -45,10 +45,17 @@ ALERT_ENDPOINT = "/api/v1/alerts"
 
 def get_hw_status():
     parts = []
-    # GPU via nvidia-smi
+    # GPU via nvidia-smi — try PATH then common container locations
+    _smi = next(
+        (p for p in ["nvidia-smi", "/usr/bin/nvidia-smi", "/usr/local/bin/nvidia-smi"]
+         if os.path.isfile(p) or subprocess.run(["which", p], capture_output=True).returncode == 0),
+        None,
+    )
     try:
+        if not _smi:
+            raise FileNotFoundError("nvidia-smi not found — add 'runtime: nvidia' to cv-ui in compose file")
         res = subprocess.run(
-            ["nvidia-smi",
+            [_smi,
              "--query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
