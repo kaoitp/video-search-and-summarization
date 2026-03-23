@@ -1,0 +1,7 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# VST runtime data (generated at runtime, not for version control)
+vst/vst_volume/
