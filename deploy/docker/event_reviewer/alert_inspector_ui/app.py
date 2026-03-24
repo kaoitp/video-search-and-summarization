@@ -428,7 +428,6 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
                     chatbot = gr.Chatbot(
                         label="Conversation",
                         height=460,
-                        show_copy_button=True,
                     )
                     with gr.Row():
                         chat_in  = gr.Textbox(
