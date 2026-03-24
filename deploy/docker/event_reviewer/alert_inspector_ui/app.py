@@ -13,6 +13,7 @@ Configuration comes entirely from environment variables set in .env / compose.
 
 import json
 import os
+import shutil
 import threading
 import time
 from datetime import datetime, timezone
@@ -255,16 +256,17 @@ def _video_path(alert: dict) -> str | None:
     if not actual:
         return None
 
-    # Place a symlink inside /tmp so Gradio's path-check always passes.
-    # Path.is_relative_to() is string-based, so the symlink path (/tmp/…) is
-    # used for the check rather than resolving to the original mount point.
-    link = os.path.join(_PREVIEW_DIR, os.path.basename(actual))
-    try:
-        if not os.path.lexists(link):
-            os.symlink(actual, link)
-        return link
-    except Exception:
-        return actual   # fallback: Gradio may still refuse, but nothing else to try
+    # Gradio 6 calls Path.resolve() (follows symlinks) before checking allowed_paths,
+    # so symlinks are useless here.  Use a hard link instead — a hard link IS a real
+    # file entry in _PREVIEW_DIR with no indirection to resolve.
+    # If the video is on a different filesystem from /tmp (common), fall back to copy.
+    dest = os.path.join(_PREVIEW_DIR, os.path.basename(actual))
+    if not os.path.exists(dest):
+        try:
+            os.link(actual, dest)           # hard link — instant, zero extra space
+        except OSError:
+            shutil.copy2(actual, dest)      # cross-filesystem fallback
+    return dest
 
 
 # ─── Pagination ───────────────────────────────────────────────────────────────
