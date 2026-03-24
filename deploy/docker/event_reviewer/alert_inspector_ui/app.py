@@ -56,20 +56,42 @@ def _snapshot() -> list[dict]:
         return list(_store)
 
 
-# ─── Background: poll REST API for historical alerts ───────────────────────────
+# ─── Fetch alerts from REST API (also called synchronously on demand) ─────────
+_fetch_status = ""
+_fetch_lock   = threading.Lock()
+
+
+def _fetch_now() -> str:
+    """Fetch from REST API immediately; return a status/error string."""
+    global _fetch_status
+    try:
+        r = requests.get(f"{ALERT_BRIDGE_HTTP}/api/v1/alerts", timeout=10)
+        if r.ok:
+            payload = r.json()
+            items = (payload if isinstance(payload, list)
+                     else payload.get("alerts",
+                          payload.get("results",
+                          payload.get("data", []))))
+            count = 0
+            for item in reversed(items):
+                if isinstance(item, dict):
+                    _upsert(item)
+                    count += 1
+            msg = f"✅ Fetched {count} alerts  (HTTP {r.status_code})"
+        else:
+            msg = f"❌ HTTP {r.status_code}: {r.text[:300]}"
+    except Exception as e:
+        msg = f"❌ Cannot reach {ALERT_BRIDGE_HTTP}/api/v1/alerts — {e}"
+
+    with _fetch_lock:
+        _fetch_status = msg
+    return msg
+
+
+# ─── Background: poll REST API every 30 s ─────────────────────────────────────
 def _poll_rest() -> None:
     while True:
-        try:
-            r = requests.get(f"{ALERT_BRIDGE_HTTP}/api/v1/alerts", timeout=10)
-            if r.ok:
-                payload = r.json()
-                items = (payload if isinstance(payload, list)
-                         else payload.get("alerts", payload.get("results", [])))
-                for item in reversed(items):
-                    if isinstance(item, dict):
-                        _upsert(item)
-        except Exception:
-            pass
+        _fetch_now()
         time.sleep(30)
 
 
@@ -131,8 +153,11 @@ def _video_path(alert: dict) -> str | None:
 
 
 # ─── Pagination logic ──────────────────────────────────────────────────────────
-def load_page(page: int, search: str):
-    """Return (table_rows, page_info_str, new_page_int, page_alerts_list)."""
+def load_page(page: int, search: str, force_fetch: bool = False):
+    """Return (table_rows, page_info_str, new_page_int, page_alerts_list, fetch_msg)."""
+    fetch_msg = ""
+    if force_fetch or len(_store) == 0:
+        fetch_msg = _fetch_now()
     alerts = _snapshot()
 
     q = search.strip().lower()
@@ -175,7 +200,7 @@ def load_page(page: int, search: str):
         ])
 
     info = f"Page {page} / {total_pages}   ({total} alerts)"
-    return rows, info, page, chunk
+    return rows, info, page, chunk, fetch_msg
 
 
 # ─── Row-selection handler ────────────────────────────────────────────────────
@@ -384,6 +409,12 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
                         btn_refresh = gr.Button("🔄  Refresh", variant="secondary",
                                                 scale=1, min_width=90)
 
+                    fetch_status_box = gr.Textbox(
+                        show_label=False, interactive=False,
+                        placeholder="API status will appear here after loading…",
+                        elem_classes="status-bar",
+                    )
+
                     tbl = gr.Dataframe(
                         headers=["ID", "Timestamp", "Sensor", "Stream",
                                  "Severity", "Type", "Alert Status", "VLM Result", "Verified"],
@@ -453,45 +484,46 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
 
     # ═══ Event wiring ═════════════════════════════════════════════════════════
 
-    def _load(page, search):
-        rows, info, pg, pa = load_page(page, search)
-        return rows, info, pg, pa
+    OUTPUTS = [tbl, pg_info, _page, _palerts, fetch_status_box]
 
-    # Initial load
+    def _load(page, search, force=False):
+        return load_page(page, search, force_fetch=force)
+
+    # Initial load — force fetch so data appears immediately
     demo.load(
-        fn=lambda: _load(1, ""),
-        outputs=[tbl, pg_info, _page, _palerts],
+        fn=lambda: _load(1, "", force=True),
+        outputs=OUTPUTS,
     )
 
-    # Refresh
+    # Refresh — always force fetch
     btn_refresh.click(
-        fn=lambda s: _load(1, s),
+        fn=lambda s: _load(1, s, force=True),
         inputs=[search_in],
-        outputs=[tbl, pg_info, _page, _palerts],
+        outputs=OUTPUTS,
     )
 
-    # Search
+    # Search — re-filter existing store (no force fetch)
     btn_search.click(
         fn=lambda s: _load(1, s),
         inputs=[search_in],
-        outputs=[tbl, pg_info, _page, _palerts],
+        outputs=OUTPUTS,
     )
     search_in.submit(
         fn=lambda s: _load(1, s),
         inputs=[search_in],
-        outputs=[tbl, pg_info, _page, _palerts],
+        outputs=OUTPUTS,
     )
 
-    # Pagination
+    # Pagination — no force fetch, just re-paginate
     btn_prev.click(
         fn=lambda pg, s: _load(max(1, pg - 1), s),
         inputs=[_page, search_in],
-        outputs=[tbl, pg_info, _page, _palerts],
+        outputs=OUTPUTS,
     )
     btn_next.click(
         fn=lambda pg, s: _load(pg + 1, s),
         inputs=[_page, search_in],
-        outputs=[tbl, pg_info, _page, _palerts],
+        outputs=OUTPUTS,
     )
 
     # Row click → video + details + update chat context
