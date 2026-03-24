@@ -334,19 +334,14 @@ footer { display: none !important; }
 
 /* Make table rows look clickable */
 .alert-tbl table tbody tr:hover { background: #e8eeff !important; cursor: pointer; }
+
+/* Constrain table height with scroll */
+.alert-tbl { max-height: 430px; overflow-y: auto; }
 """
 
 
 # ─── Gradio UI ────────────────────────────────────────────────────────────────
-with gr.Blocks(
-    title="🚨 Alert Inspector",
-    theme=gr.themes.Soft(
-        primary_hue=gr.themes.colors.indigo,
-        secondary_hue=gr.themes.colors.purple,
-        neutral_hue=gr.themes.colors.slate,
-    ),
-    css=CSS,
-) as demo:
+with gr.Blocks(title="🚨 Alert Inspector") as demo:
 
     # ── Shared state ──────────────────────────────────────────────────────────
     _page    = gr.State(1)
@@ -394,8 +389,6 @@ with gr.Blocks(
                                  "Severity", "Type", "Alert Status", "VLM Result", "Verified"],
                         datatype=["str"] * 9,
                         interactive=False,
-                        wrap=False,
-                        height=430,
                         elem_classes="alert-tbl",
                     )
 
@@ -436,7 +429,6 @@ with gr.Blocks(
                         label="Conversation",
                         height=460,
                         show_copy_button=True,
-                        bubble_full_width=False,
                     )
                     with gr.Row():
                         chat_in  = gr.Textbox(
@@ -536,4 +528,6 @@ if __name__ == "__main__":
         server_port=GRADIO_PORT,
         allowed_paths=[MEDIA_DIR],
         share=False,
+        theme=gr.themes.Soft(),
+        css=CSS,
     )
