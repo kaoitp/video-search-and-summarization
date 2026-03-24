@@ -652,7 +652,7 @@ if __name__ == "__main__":
     demo.launch(
         server_name=GRADIO_HOST,
         server_port=GRADIO_PORT,
-        allowed_paths=[MEDIA_DIR],
+        allowed_paths=[MEDIA_DIR, _PREVIEW_DIR],
         share=False,
         theme=gr.themes.Soft(),
         css=CSS,
