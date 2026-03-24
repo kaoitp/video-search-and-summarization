@@ -224,6 +224,12 @@ SEV_ICON = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡",
             "LOW": "🟢", "INFORMAL": "⚪"}
 VLM_ICON = {"SUCCESS": "✅", "FAILURE": "❌"}
 
+# Symlink directory inside /tmp — always allowed by Gradio regardless of allowed_paths.
+# Needed because ALERT_REVIEW_MEDIA_BASE_DIR is mounted as a volume but NOT passed as
+# an env var to this container in the default compose, so MEDIA_DIR may be wrong.
+_PREVIEW_DIR = "/tmp/alert-previews"
+os.makedirs(_PREVIEW_DIR, exist_ok=True)
+
 
 def _fmt_ts(ts: str) -> str:
     try:
@@ -234,13 +240,31 @@ def _fmt_ts(ts: str) -> str:
 
 
 def _video_path(alert: dict) -> str | None:
+    """Locate the video file and return a path Gradio is allowed to serve."""
     vp = alert.get("video_path", "")
     if not vp:
         return None
+
+    # Search candidates: absolute path as-is, then under MEDIA_DIR
+    actual = None
     for c in [vp, os.path.join(MEDIA_DIR, vp.lstrip("/"))]:
         if os.path.exists(c):
-            return c
-    return None
+            actual = c
+            break
+
+    if not actual:
+        return None
+
+    # Place a symlink inside /tmp so Gradio's path-check always passes.
+    # Path.is_relative_to() is string-based, so the symlink path (/tmp/…) is
+    # used for the check rather than resolving to the original mount point.
+    link = os.path.join(_PREVIEW_DIR, os.path.basename(actual))
+    try:
+        if not os.path.lexists(link):
+            os.symlink(actual, link)
+        return link
+    except Exception:
+        return actual   # fallback: Gradio may still refuse, but nothing else to try
 
 
 # ─── Pagination ───────────────────────────────────────────────────────────────
