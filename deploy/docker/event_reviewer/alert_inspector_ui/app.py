@@ -3,9 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 ######################################################################################################
 """
-Alert Inspector UI — rebuilt
-Paginated alert table, inline video preview, and VLM chat.
-All configuration is read from environment variables (set via .env / compose).
+Alert Inspector UI — rebuilt.
+Mirrors the NVIDIA vss-alert-inspector-ui data flow:
+  • Primary  : reads directly from Redis stream `alert-bridge-enhanced-stream`
+               (same stream the alert-bridge WebSocket feeds from)
+  • Fallback : WebSocket ws://alert-bridge:9080/ws  +  REST GET /api/v1/alerts
+Configuration comes entirely from environment variables set in .env / compose.
 """
 
 import json
@@ -17,28 +20,36 @@ from datetime import datetime, timezone
 import gradio as gr
 import requests
 
-# ─── Configuration from environment (no changes to compose needed) ────────────
-ALERT_BRIDGE_WS_URL  = os.environ.get("ALERT_BRIDGE_BASE_URL", "ws://alert-bridge:9080")
-ALERT_BRIDGE_HTTP    = (ALERT_BRIDGE_WS_URL
-                        .replace("ws://",  "http://")
-                        .replace("wss://", "https://"))
-BACKEND_IP           = os.environ.get("BACKEND_IP",   "via-server")
-BACKEND_PORT         = os.environ.get("BACKEND_PORT", "8000")
-VSS_URL              = f"http://{BACKEND_IP}:{BACKEND_PORT}"
-MEDIA_DIR            = os.environ.get("ALERT_REVIEW_MEDIA_BASE_DIR", "/tmp/alerts")
-GRADIO_HOST          = os.environ.get("GRADIO_SERVER", "0.0.0.0")
-GRADIO_PORT          = int(os.environ.get("GRADIO_PORT", "7860"))
-PAGE_SIZE            = 20
+# ─── Configuration (from environment — no compose edits needed) ───────────────
+ALERT_BRIDGE_WS_URL = os.environ.get("ALERT_BRIDGE_BASE_URL", "ws://alert-bridge:9080")
+ALERT_BRIDGE_HTTP   = (ALERT_BRIDGE_WS_URL
+                       .replace("ws://",  "http://")
+                       .replace("wss://", "https://"))
+BACKEND_IP          = os.environ.get("BACKEND_IP",   "via-server")
+BACKEND_PORT        = os.environ.get("BACKEND_PORT", "8000")
+VSS_URL             = f"http://{BACKEND_IP}:{BACKEND_PORT}"
+MEDIA_DIR           = os.environ.get("ALERT_REVIEW_MEDIA_BASE_DIR", "/tmp/alerts")
+GRADIO_HOST         = os.environ.get("GRADIO_SERVER", "0.0.0.0")
+GRADIO_PORT         = int(os.environ.get("GRADIO_PORT", "7860"))
+
+# Redis — same defaults the alert-bridge config.yaml uses
+REDIS_HOST   = os.environ.get("REDIS_HOST",   "redis")
+REDIS_PORT   = int(os.environ.get("REDIS_PORT",   "6379"))
+STREAM_NAME  = os.environ.get("ALERT_STREAM", "alert-bridge-enhanced-stream")
+
+PAGE_SIZE = 20
 
 
-# ─── In-memory alert store ─────────────────────────────────────────────────────
+# ─── In-memory store ──────────────────────────────────────────────────────────
 _store: list[dict] = []
 _lock  = threading.Lock()
 _MAX   = 10_000
+_last_id = "0-0"          # Redis stream cursor (track what we've read)
+_last_id_lock = threading.Lock()
 
 
 def _upsert(alert: dict) -> None:
-    """Insert or update an alert by id (newest-first order)."""
+    """Insert or update alert by id (newest-first)."""
     with _lock:
         aid = alert.get("id")
         if aid:
@@ -56,16 +67,78 @@ def _snapshot() -> list[dict]:
         return list(_store)
 
 
-# ─── Fetch alerts from REST API (also called synchronously on demand) ─────────
+# ─── Redis helpers ────────────────────────────────────────────────────────────
+def _redis_client():
+    import redis
+    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0,
+                       decode_responses=True, socket_timeout=5,
+                       socket_connect_timeout=5)
+
+
+def _parse_stream_entry(fields: dict) -> dict | None:
+    """Extract the JSON alert payload from a Redis stream entry's fields."""
+    # The alert-bridge stores the full ReviewAlertResponse JSON as a single field.
+    # Try common field names first, then fall back to any field that looks like JSON.
+    for key in ("data", "message", "payload", "alert", "result", "body", "event"):
+        val = fields.get(key, "")
+        if val and isinstance(val, str):
+            try:
+                obj = json.loads(val)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
+    # Fallback: try every field value
+    for val in fields.values():
+        if isinstance(val, str) and val.strip().startswith("{"):
+            try:
+                obj = json.loads(val)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
+    return None
+
+
+# ─── Fetch: read ALL history from Redis stream ────────────────────────────────
 _fetch_status = ""
 _fetch_lock   = threading.Lock()
 
 
-def _fetch_now() -> str:
-    """Fetch from REST API immediately; return a status/error string."""
-    global _fetch_status
+def _fetch_redis_all() -> str:
+    """XRANGE the full stream and populate the store. Returns status string."""
+    global _last_id
     try:
-        r = requests.get(f"{ALERT_BRIDGE_HTTP}/api/v1/alerts", timeout=10)
+        r = _redis_client()
+        entries = r.xrange(STREAM_NAME, "-", "+")
+        count = 0
+        for msg_id, fields in entries:
+            obj = _parse_stream_entry(fields)
+            if obj:
+                _upsert(obj)
+                count += 1
+        with _last_id_lock:
+            if entries:
+                _last_id = entries[-1][0]   # advance cursor
+        msg = f"✅ Redis '{STREAM_NAME}': {count} alerts loaded"
+    except ImportError:
+        msg = "❌ redis-py not installed (add redis to requirements.txt)"
+    except Exception as e:
+        msg = f"❌ Redis {REDIS_HOST}:{REDIS_PORT} — {e}"
+
+    # Also try the REST fallback
+    rest_msg = _fetch_rest_fallback()
+    combined = msg if not rest_msg else f"{msg}  |  {rest_msg}"
+
+    with _fetch_lock:
+        _fetch_status = combined
+    return combined
+
+
+def _fetch_rest_fallback() -> str:
+    """Try GET /api/v1/alerts as supplemental source. Returns brief status."""
+    try:
+        r = requests.get(f"{ALERT_BRIDGE_HTTP}/api/v1/alerts", timeout=5)
         if r.ok:
             payload = r.json()
             items = (payload if isinstance(payload, list)
@@ -73,36 +146,55 @@ def _fetch_now() -> str:
                           payload.get("results",
                           payload.get("data", []))))
             count = 0
-            for item in reversed(items):
+            for item in reversed(items or []):
                 if isinstance(item, dict):
                     _upsert(item)
                     count += 1
-            msg = f"✅ Fetched {count} alerts  (HTTP {r.status_code})"
-        else:
-            msg = f"❌ HTTP {r.status_code}: {r.text[:300]}"
-    except Exception as e:
-        msg = f"❌ Cannot reach {ALERT_BRIDGE_HTTP}/api/v1/alerts — {e}"
-
-    with _fetch_lock:
-        _fetch_status = msg
-    return msg
+            return f"REST +{count}" if count else ""
+        return f"REST HTTP {r.status_code}"
+    except Exception:
+        return ""
 
 
-# ─── Background: poll REST API every 30 s ─────────────────────────────────────
-def _poll_rest() -> None:
+# ─── Background: real-time Redis XREAD ───────────────────────────────────────
+def _redis_stream_loop() -> None:
+    """Continuously tail the stream for new entries."""
+    global _last_id
+    r = None
     while True:
-        _fetch_now()
-        time.sleep(30)
+        try:
+            if r is None:
+                r = _redis_client()
+
+            with _last_id_lock:
+                cursor = _last_id
+
+            # block=2000 ms — wait for new messages
+            results = r.xread({STREAM_NAME: cursor}, count=50, block=2000)
+            if results:
+                for _stream, entries in results:
+                    for msg_id, fields in entries:
+                        obj = _parse_stream_entry(fields)
+                        if obj:
+                            _upsert(obj)
+                    with _last_id_lock:
+                        _last_id = entries[-1][0]
+        except ImportError:
+            time.sleep(60)   # redis-py not installed — stop retrying fast
+        except Exception as e:
+            r = None
+            time.sleep(5)
 
 
-# ─── Background: WebSocket listener for real-time updates ─────────────────────
+# ─── Background: WebSocket from alert-bridge (supplemental) ──────────────────
 def _ws_loop() -> None:
     try:
-        import websocket  # optional
+        import websocket
     except ImportError:
         return
 
-    paths = ["/ws", "/ws/alerts", "/api/v1/ws", ""]
+    # Try known paths; the alert-bridge config uses consumer_group_prefix="websocket_instance"
+    paths = ["/ws", "/ws/alerts", "/api/v1/ws", "/api/ws", ""]
     while True:
         for path in paths:
             try:
@@ -122,15 +214,14 @@ def _ws_loop() -> None:
         time.sleep(10)
 
 
-threading.Thread(target=_poll_rest, daemon=True, name="rest-poller").start()
-threading.Thread(target=_ws_loop,   daemon=True, name="ws-listener").start()
+# Start background threads
+threading.Thread(target=_redis_stream_loop, daemon=True, name="redis-tail").start()
+threading.Thread(target=_ws_loop,           daemon=True, name="ws-listener").start()
 
 
-# ─── Utilities ─────────────────────────────────────────────────────────────────
-SEV_ICON = {
-    "CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡",
-    "LOW": "🟢", "INFORMAL": "⚪",
-}
+# ─── Utilities ────────────────────────────────────────────────────────────────
+SEV_ICON = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡",
+            "LOW": "🟢", "INFORMAL": "⚪"}
 VLM_ICON = {"SUCCESS": "✅", "FAILURE": "❌"}
 
 
@@ -146,33 +237,33 @@ def _video_path(alert: dict) -> str | None:
     vp = alert.get("video_path", "")
     if not vp:
         return None
-    for candidate in [vp, os.path.join(MEDIA_DIR, vp.lstrip("/"))]:
-        if os.path.exists(candidate):
-            return candidate
+    for c in [vp, os.path.join(MEDIA_DIR, vp.lstrip("/"))]:
+        if os.path.exists(c):
+            return c
     return None
 
 
-# ─── Pagination logic ──────────────────────────────────────────────────────────
+# ─── Pagination ───────────────────────────────────────────────────────────────
 def load_page(page: int, search: str, force_fetch: bool = False):
-    """Return (table_rows, page_info_str, new_page_int, page_alerts_list, fetch_msg)."""
     fetch_msg = ""
     if force_fetch or len(_store) == 0:
-        fetch_msg = _fetch_now()
+        fetch_msg = _fetch_redis_all()
+
     alerts = _snapshot()
 
     q = search.strip().lower()
     if q:
         def _match(a):
-            haystack = " ".join([
+            hay = " ".join([
                 a.get("id", ""),
                 a.get("sensor_id", ""),
-                a.get("stream_name", ""),
+                a.get("stream_name", "") or "",
                 (a.get("alert") or {}).get("type", ""),
-                (a.get("alert") or {}).get("description", ""),
-                (a.get("result") or {}).get("description", ""),
-                (a.get("result") or {}).get("reasoning", ""),
+                (a.get("alert") or {}).get("description", "") or "",
+                (a.get("result") or {}).get("description", "") or "",
+                (a.get("result") or {}).get("reasoning", "") or "",
             ]).lower()
-            return q in haystack
+            return q in hay
         alerts = list(filter(_match, alerts))
 
     total       = len(alerts)
@@ -185,17 +276,17 @@ def load_page(page: int, search: str, force_fetch: bool = False):
         ai  = a.get("alert") or {}
         res = a.get("result") or {}
         sev = (ai.get("severity") or "").upper()
-        vlm = (res.get("status") or "").upper()
+        vlm = (res.get("status")   or "").upper()
         ver = res.get("verification_result")
         rows.append([
             (a.get("id") or "")[:12],
             _fmt_ts(a.get("@timestamp", "")),
-            a.get("sensor_id", "") or "—",
+            a.get("sensor_id",   "") or "—",
             a.get("stream_name", "") or "—",
-            f"{SEV_ICON.get(sev, '⚫')} {sev}" if sev else "—",
-            ai.get("type", "") or "—",
+            f"{SEV_ICON.get(sev,'⚫')} {sev}" if sev else "—",
+            ai.get("type",   "") or "—",
             ai.get("status", "") or "—",
-            f"{VLM_ICON.get(vlm, '⏳')} {vlm}" if vlm else "⏳ PENDING",
+            f"{VLM_ICON.get(vlm,'⏳')} {vlm}" if vlm else "⏳ PENDING",
             "✅" if ver is True else ("❌" if ver is False else "—"),
         ])
 
@@ -203,18 +294,17 @@ def load_page(page: int, search: str, force_fetch: bool = False):
     return rows, info, page, chunk, fetch_msg
 
 
-# ─── Row-selection handler ────────────────────────────────────────────────────
+# ─── Row selection ────────────────────────────────────────────────────────────
 def select_alert(evt: gr.SelectData, page_alerts: list):
-    """Called when user clicks a row; returns video, detail markdown, json, ctx."""
     idx = evt.index[0]
     if not page_alerts or not (0 <= idx < len(page_alerts)):
-        return None, "*Select an alert row to preview details.*", "{}", "No alert selected."
+        return None, "*Select a row to preview details.*", "{}", "No alert selected."
 
     a   = page_alerts[idx]
     ai  = a.get("alert") or {}
     res = a.get("result") or {}
     sev = (ai.get("severity") or "").upper()
-    vlm = (res.get("status") or "").upper()
+    vlm = (res.get("status")   or "").upper()
     ver = res.get("verification_result")
 
     md = f"""### Alert `{(a.get("id") or "")[:12]}…`
@@ -250,23 +340,18 @@ def select_alert(evt: gr.SelectData, page_alerts: list):
 
     ctx = "\n".join([
         f"Alert ID   : {a.get('id', 'N/A')}",
-        f"Type       : {ai.get('type', 'N/A')} | Severity: {sev}",
-        f"Description: {ai.get('description', 'N/A')}",
+        f"Type       : {ai.get('type','N/A')} | Severity: {sev}",
+        f"Description: {ai.get('description','N/A')}",
         f"VLM Status : {vlm or 'PENDING'}",
-        f"Analysis   : {res.get('description', 'N/A')}",
-        f"Reasoning  : {res.get('reasoning', 'N/A')}",
+        f"Analysis   : {res.get('description','N/A')}",
+        f"Reasoning  : {res.get('reasoning','N/A')}",
         f"Verified   : {'Yes' if ver is True else ('No' if ver is False else 'N/A')}",
     ])
 
-    return (
-        _video_path(a),
-        md,
-        json.dumps(a, indent=2, ensure_ascii=False),
-        ctx,
-    )
+    return _video_path(a), md, json.dumps(a, indent=2, ensure_ascii=False), ctx
 
 
-# ─── Chat handler ──────────────────────────────────────────────────────────────
+# ─── Chat ─────────────────────────────────────────────────────────────────────
 def send_chat(user_msg: str, history: list, ctx: str):
     if not user_msg.strip():
         return history, ""
@@ -292,10 +377,8 @@ def send_chat(user_msg: str, history: list, ctx: str):
                   "max_tokens": 1024, "temperature": 0.2},
             timeout=120,
         )
-        if r.ok:
-            bot = r.json()["choices"][0]["message"]["content"]
-        else:
-            bot = f"API error: HTTP {r.status_code}\n{r.text[:200]}"
+        bot = (r.json()["choices"][0]["message"]["content"]
+               if r.ok else f"API error HTTP {r.status_code}\n{r.text[:200]}")
     except Exception as e:
         bot = f"Connection error: {e}"
 
@@ -305,17 +388,33 @@ def send_chat(user_msg: str, history: list, ctx: str):
 # ─── Status bar ───────────────────────────────────────────────────────────────
 def get_status() -> str:
     parts = []
-    for label, url in [
-        ("Alert-Bridge", f"{ALERT_BRIDGE_HTTP}/health"),
-        ("VSS Engine",   f"{VSS_URL}/health/live"),
-    ]:
-        try:
-            r = requests.get(url, timeout=3)
-            parts.append(f"🟢 {label}" if r.ok else f"🟡 {label} ({r.status_code})")
-        except Exception:
-            parts.append(f"🔴 {label}")
+
+    # Redis
+    try:
+        r = _redis_client()
+        r.ping()
+        length = r.xlen(STREAM_NAME)
+        parts.append(f"🟢 Redis ({length} stream entries)")
+    except Exception as e:
+        parts.append(f"🔴 Redis: {e}")
+
+    # Alert-Bridge
+    try:
+        r2 = requests.get(f"{ALERT_BRIDGE_HTTP}/health", timeout=3)
+        parts.append("🟢 Alert-Bridge" if r2.ok else f"🟡 Alert-Bridge ({r2.status_code})")
+    except Exception:
+        parts.append("🔴 Alert-Bridge")
+
+    # VSS
+    try:
+        r3 = requests.get(f"{VSS_URL}/health/live", timeout=3)
+        parts.append("🟢 VSS" if r3.ok else f"🟡 VSS ({r3.status_code})")
+    except Exception:
+        parts.append("🔴 VSS")
+
     with _lock:
         parts.append(f"📊 {len(_store)} alerts cached")
+
     return "  |  ".join(parts)
 
 
@@ -340,6 +439,11 @@ footer { display: none !important; }
     border-radius: 6px !important;
 }
 
+.fetch-info textarea {
+    font-family: 'Courier New', monospace !important;
+    font-size: 0.78rem !important;
+}
+
 .page-counter input, .page-counter textarea {
     text-align: center !important;
     font-weight: 700 !important;
@@ -357,10 +461,9 @@ footer { display: none !important; }
     font-size: 0.82rem !important;
 }
 
-/* Make table rows look clickable */
+/* Table hover */
 .alert-tbl table tbody tr:hover { background: #e8eeff !important; cursor: pointer; }
-
-/* Constrain table height with scroll */
+/* Constrain table height */
 .alert-tbl { max-height: 430px; overflow-y: auto; }
 """
 
@@ -370,8 +473,8 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
 
     # ── Shared state ──────────────────────────────────────────────────────────
     _page    = gr.State(1)
-    _palerts = gr.State([])   # alerts on current page (for row-select lookup)
-    _ctx     = gr.State("No alert selected.")   # chat context from selected alert
+    _palerts = gr.State([])
+    _ctx     = gr.State("No alert selected.")
 
     # ── Header ───────────────────────────────────────────────────────────────
     with gr.Row(elem_classes="app-header"):
@@ -394,25 +497,25 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
     # ── Tabs ─────────────────────────────────────────────────────────────────
     with gr.Tabs():
 
-        # ═══════════════════════════ Tab 1: Alert List ═══════════════════════
+        # ═══════════════════════ Tab 1: Alert List ═══════════════════════════
         with gr.TabItem("📋  Alert List"):
             with gr.Row():
 
-                # ── Left column: search + table + pagination ──────────────
+                # ── Left: controls + table + pagination ───────────────────
                 with gr.Column(scale=11):
                     with gr.Row():
                         search_in   = gr.Textbox(
-                            placeholder="🔍  Filter by sensor, type, description, alert ID…",
+                            placeholder="🔍  Filter by sensor, type, description, ID…",
                             show_label=False, scale=5,
                         )
-                        btn_search  = gr.Button("Search",      scale=1, min_width=80)
+                        btn_search  = gr.Button("Search", scale=1, min_width=80)
                         btn_refresh = gr.Button("🔄  Refresh", variant="secondary",
                                                 scale=1, min_width=90)
 
                     fetch_status_box = gr.Textbox(
                         show_label=False, interactive=False,
-                        placeholder="API status will appear here after loading…",
-                        elem_classes="status-bar",
+                        placeholder="Fetch status will appear here…",
+                        elem_classes="fetch-info",
                     )
 
                     tbl = gr.Dataframe(
@@ -433,7 +536,7 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
                         btn_next = gr.Button("Next  ▶", variant="secondary",
                                              scale=1, min_width=90)
 
-                # ── Right column: video preview + alert details ───────────
+                # ── Right: video + details ────────────────────────────────
                 with gr.Column(scale=7):
                     video_out = gr.Video(
                         label="📹  Video Preview",
@@ -450,16 +553,12 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
                             elem_classes="json-box",
                         )
 
-        # ═══════════════════════════ Tab 2: Chat ═════════════════════════════
+        # ═══════════════════════ Tab 2: Chat ═════════════════════════════════
         with gr.TabItem("💬  Chat with VLM"):
             with gr.Row():
 
-                # ── Chat panel ────────────────────────────────────────────
                 with gr.Column(scale=3):
-                    chatbot = gr.Chatbot(
-                        label="Conversation",
-                        height=460,
-                    )
+                    chatbot = gr.Chatbot(label="Conversation", height=460)
                     with gr.Row():
                         chat_in  = gr.Textbox(
                             placeholder="Ask about the selected alert or any surveillance question…",
@@ -469,7 +568,6 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
                                              scale=1, min_width=80)
                     btn_clr = gr.Button("🗑️  Clear conversation", variant="secondary")
 
-                # ── Alert context sidebar ─────────────────────────────────
                 with gr.Column(scale=1):
                     gr.Markdown("### 📌  Alert Context")
                     gr.Markdown(
@@ -482,72 +580,45 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
                         elem_classes="ctx-box",
                     )
 
-    # ═══ Event wiring ═════════════════════════════════════════════════════════
+    # ═══ Event wiring ════════════════════════════════════════════════════════
 
     OUTPUTS = [tbl, pg_info, _page, _palerts, fetch_status_box]
 
     def _load(page, search, force=False):
         return load_page(page, search, force_fetch=force)
 
-    # Initial load — force fetch so data appears immediately
-    demo.load(
-        fn=lambda: _load(1, "", force=True),
-        outputs=OUTPUTS,
-    )
+    # Initial load — force fetch from Redis
+    demo.load(fn=lambda: _load(1, "", force=True), outputs=OUTPUTS)
 
-    # Refresh — always force fetch
-    btn_refresh.click(
-        fn=lambda s: _load(1, s, force=True),
-        inputs=[search_in],
-        outputs=OUTPUTS,
-    )
+    # Refresh — force fetch
+    btn_refresh.click(fn=lambda s: _load(1, s, force=True),
+                      inputs=[search_in], outputs=OUTPUTS)
 
-    # Search — re-filter existing store (no force fetch)
-    btn_search.click(
-        fn=lambda s: _load(1, s),
-        inputs=[search_in],
-        outputs=OUTPUTS,
-    )
-    search_in.submit(
-        fn=lambda s: _load(1, s),
-        inputs=[search_in],
-        outputs=OUTPUTS,
-    )
+    # Search — filter existing store
+    btn_search.click(fn=lambda s: _load(1, s),
+                     inputs=[search_in], outputs=OUTPUTS)
+    search_in.submit(fn=lambda s: _load(1, s),
+                     inputs=[search_in], outputs=OUTPUTS)
 
-    # Pagination — no force fetch, just re-paginate
-    btn_prev.click(
-        fn=lambda pg, s: _load(max(1, pg - 1), s),
-        inputs=[_page, search_in],
-        outputs=OUTPUTS,
-    )
-    btn_next.click(
-        fn=lambda pg, s: _load(pg + 1, s),
-        inputs=[_page, search_in],
-        outputs=OUTPUTS,
-    )
+    # Pagination
+    btn_prev.click(fn=lambda pg, s: _load(max(1, pg - 1), s),
+                   inputs=[_page, search_in], outputs=OUTPUTS)
+    btn_next.click(fn=lambda pg, s: _load(pg + 1, s),
+                   inputs=[_page, search_in], outputs=OUTPUTS)
 
-    # Row click → video + details + update chat context
-    tbl.select(
-        fn=select_alert,
-        inputs=[_palerts],
-        outputs=[video_out, detail_md, json_out, _ctx],
-    ).then(
-        fn=lambda c: c,
-        inputs=[_ctx],
-        outputs=[ctx_box],
-    )
+    # Row click → video + details + sync chat context
+    tbl.select(fn=select_alert,
+               inputs=[_palerts],
+               outputs=[video_out, detail_md, json_out, _ctx])
+    _ctx.change(fn=lambda c: c, inputs=[_ctx], outputs=[ctx_box])
 
     # Chat
-    btn_send.click(
-        fn=send_chat,
-        inputs=[chat_in, chatbot, _ctx],
-        outputs=[chatbot, chat_in],
-    )
-    chat_in.submit(
-        fn=send_chat,
-        inputs=[chat_in, chatbot, _ctx],
-        outputs=[chatbot, chat_in],
-    )
+    btn_send.click(fn=send_chat,
+                   inputs=[chat_in, chatbot, _ctx],
+                   outputs=[chatbot, chat_in])
+    chat_in.submit(fn=send_chat,
+                   inputs=[chat_in, chatbot, _ctx],
+                   outputs=[chatbot, chat_in])
     btn_clr.click(fn=lambda: [], outputs=[chatbot])
 
 
