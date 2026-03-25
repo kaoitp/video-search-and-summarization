@@ -298,7 +298,7 @@ def load_page(page: int, search: str, force_fetch: bool = False, tz: str = "UTC"
     if force_fetch or len(_store) == 0:
         fetch_msg = _fetch_redis_all()
 
-    alerts = _snapshot()
+    alerts = [a for a in _snapshot() if a.get("video_path")]
 
     q = search.strip().lower()
     if q:
@@ -482,9 +482,16 @@ def send_chat(user_msg: str, history: list, ctx: str, alert: dict):
 
     # 2. Query VLM via /summarize (streaming) — works without CA-RAG
     # Build prompt from conversation history + current question
-    prompt = user_msg
+    system_instruction = (
+        "You are a concise security analyst assistant. "
+        "Match your response length to the question: "
+        "answer simple yes/no or factual questions in 1-2 sentences; "
+        "provide full detail only when the user explicitly asks for analysis, explanation, or reasoning."
+    )
     if ctx and ctx.strip() and ctx != "No alert selected.":
-        prompt = f"Alert context:\n{ctx}\n\nQuestion: {user_msg}"
+        prompt = f"{system_instruction}\n\nAlert context:\n{ctx}\n\nQuestion: {user_msg}"
+    else:
+        prompt = f"{system_instruction}\n\nQuestion: {user_msg}"
 
     bot = ""
     yield history + [{"role": "assistant", "content": "⏳ กำลังวิเคราะห์วิดีโอ…"}], ""
@@ -492,7 +499,8 @@ def send_chat(user_msg: str, history: list, ctx: str, alert: dict):
         with requests.post(
             f"{VSS_URL}/summarize",
             json={"id": via_id, "model": _get_vlm_model(),
-                  "prompt": prompt, "stream": True, "max_tokens": 1024},
+                  "prompt": prompt, "stream": True, "max_tokens": 512,
+                  "num_frames": 6},
             stream=True, timeout=600,
         ) as r:
             if not r.ok:
