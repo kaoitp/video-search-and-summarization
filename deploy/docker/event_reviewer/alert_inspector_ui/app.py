@@ -29,6 +29,23 @@ ALERT_BRIDGE_HTTP   = (ALERT_BRIDGE_WS_URL
 BACKEND_IP          = os.environ.get("BACKEND_IP",   "via-server")
 BACKEND_PORT        = os.environ.get("BACKEND_PORT", "8000")
 VSS_URL             = f"http://{BACKEND_IP}:{BACKEND_PORT}"
+_vlm_model_cache: str | None = None
+
+
+def _get_vlm_model() -> str | None:
+    global _vlm_model_cache
+    if _vlm_model_cache:
+        return _vlm_model_cache
+    try:
+        r = requests.get(f"{VSS_URL}/models", timeout=5)
+        if r.ok:
+            models = r.json().get("data", [])
+            if models:
+                _vlm_model_cache = models[0]["id"]
+                return _vlm_model_cache
+    except Exception:
+        pass
+    return None
 MEDIA_DIR           = os.environ.get("ALERT_REVIEW_MEDIA_BASE_DIR", "/tmp/alerts")
 GRADIO_HOST         = os.environ.get("GRADIO_SERVER", "0.0.0.0")
 GRADIO_PORT         = int(os.environ.get("GRADIO_PORT", "7860"))
@@ -324,7 +341,7 @@ def load_page(page: int, search: str, force_fetch: bool = False):
 def select_alert(evt: gr.SelectData, page_alerts: list):
     idx = evt.index[0]
     if not page_alerts or not (0 <= idx < len(page_alerts)):
-        return None, "*Select a row to preview details.*", "{}", "No alert selected."
+        return None, "*Select a row to preview details.*", "{}", "No alert selected.", {}
 
     a   = page_alerts[idx]
     ai  = a.get("alert") or {}
@@ -374,41 +391,136 @@ def select_alert(evt: gr.SelectData, page_alerts: list):
         f"Verified   : {'Yes' if ver is True else ('No' if ver is False else 'N/A')}",
     ])
 
-    return _video_path(a), md, json.dumps(a, indent=2, ensure_ascii=False), ctx
+    return _video_path(a), md, json.dumps(a, indent=2, ensure_ascii=False), ctx, a
 
 
 # ─── Chat ─────────────────────────────────────────────────────────────────────
-def send_chat(user_msg: str, history: list, ctx: str):
-    if not user_msg.strip():
-        return history, ""
+_via_file_cache: dict[str, str] = {}   # local_path → VIA file_id
+_via_chat_ready: set[str] = set()      # via_id → already summarized with enable_chat
 
-    sys_prompt = (
-        "You are a helpful video surveillance security analysis assistant. "
-        "Answer questions clearly and professionally."
-    )
-    if ctx and ctx.strip() and ctx != "No alert selected.":
-        sys_prompt += f"\n\nCurrently reviewing this alert:\n{ctx}"
 
-    msgs = [{"role": "system", "content": sys_prompt}]
-    for u, b in history:
-        msgs.append({"role": "user",      "content": u})
-        if b:
-            msgs.append({"role": "assistant", "content": b})
-    msgs.append({"role": "user", "content": user_msg})
+def _get_or_upload_via_file(local_path: str) -> tuple[str | None, str]:
+    """Return (VIA file_id, error_detail). Upload the file if not yet in VIA."""
+    if not local_path:
+        return None, "video_local_path is None (ไม่พบไฟล์วิดีโอในระบบ)"
+    if not os.path.exists(local_path):
+        return None, f"ไม่พบไฟล์: `{local_path}`"
 
+    if local_path in _via_file_cache:
+        return _via_file_cache[local_path], ""
+
+    fname = os.path.basename(local_path)
+
+    # Check if VIA already has a file with the same name
     try:
-        r = requests.post(
-            f"{VSS_URL}/chat/completions",
-            json={"model": "local", "messages": msgs,
-                  "max_tokens": 1024, "temperature": 0.2},
-            timeout=120,
-        )
-        bot = (r.json()["choices"][0]["message"]["content"]
-               if r.ok else f"API error HTTP {r.status_code}\n{r.text[:200]}")
+        r = requests.get(f"{VSS_URL}/files", timeout=5)
+        if r.ok:
+            payload = r.json()
+            files = (payload if isinstance(payload, list)
+                     else payload.get("files", payload.get("data", [])))
+            for f in (files or []):
+                if not isinstance(f, dict):
+                    continue
+                if fname in (f.get("filename") or f.get("name") or ""):
+                    fid = f.get("id") or f.get("file_id")
+                    if fid:
+                        _via_file_cache[local_path] = fid
+                        return fid, ""
     except Exception as e:
-        bot = f"Connection error: {e}"
+        pass  # non-fatal; proceed to upload
 
-    return history + [(user_msg, bot)], ""
+    # Upload the file
+    try:
+        with open(local_path, "rb") as fp:
+            r = requests.post(
+                f"{VSS_URL}/files",
+                data={"purpose": "vision", "media_type": "video"},
+                files={"file": (fname, fp, "video/mp4")},
+                timeout=300,
+            )
+        if r.ok:
+            data = r.json()
+            fid = data.get("id") or data.get("file_id")
+            if fid:
+                _via_file_cache[local_path] = fid
+                return fid, ""
+            return None, f"Upload OK แต่ไม่มี id ใน response: {r.text[:300]}"
+        return None, f"Upload failed HTTP {r.status_code}: {r.text[:300]}"
+    except Exception as e:
+        return None, f"Upload exception: {e}"
+
+
+def send_chat(user_msg: str, history: list, ctx: str, alert: dict):
+    if not user_msg.strip():
+        yield history, ""
+        return
+
+    history = history + [{"role": "user", "content": user_msg}]
+
+    def _err(msg):
+        return history + [{"role": "assistant", "content": msg}], ""
+
+    # 1. Upload video to VIA if needed
+    video_local_path = _video_path(alert) if alert else None
+    via_id, upload_err = (_get_or_upload_via_file(video_local_path)
+                          if video_local_path else (None, "ยังไม่ได้เลือก alert"))
+    if not via_id:
+        vp = (alert or {}).get("video_path", "")
+        yield _err(
+            f"⚠️ ไม่สามารถ upload วิดีโอไปยัง VIA ได้\n\n"
+            f"**video_path:** `{vp or '(ไม่มี)'}`\n"
+            f"**local_path:** `{video_local_path or '(ไม่พบ)'}`\n"
+            f"**error:** {upload_err}"
+        )
+        return
+
+    # 2. Query VLM via /summarize (streaming) — works without CA-RAG
+    # Build prompt from conversation history + current question
+    prompt = user_msg
+    if ctx and ctx.strip() and ctx != "No alert selected.":
+        prompt = f"Alert context:\n{ctx}\n\nQuestion: {user_msg}"
+
+    bot = ""
+    yield history + [{"role": "assistant", "content": "⏳ กำลังวิเคราะห์วิดีโอ…"}], ""
+    try:
+        with requests.post(
+            f"{VSS_URL}/summarize",
+            json={"id": via_id, "model": _get_vlm_model(),
+                  "prompt": prompt, "stream": True, "max_tokens": 1024},
+            stream=True, timeout=600,
+        ) as r:
+            if not r.ok:
+                yield _err(f"⚠️ API error HTTP {r.status_code}: {r.text[:300]}")
+                return
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                line = line if isinstance(line, str) else line.decode()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                    choice = chunk.get("choices", [{}])[0]
+                    # non-streaming: full message at once
+                    content = (choice.get("message") or {}).get("content", "")
+                    # streaming delta fallback
+                    if not content:
+                        content = (choice.get("delta") or {}).get("content", "")
+                    if content:
+                        bot += content
+                        yield history + [{"role": "assistant", "content": bot}], ""
+                except Exception:
+                    pass
+    except Exception as e:
+        yield _err(f"⚠️ Connection error: {e}")
+        return
+
+    if not bot:
+        bot = "*(ไม่ได้รับคำตอบจาก VLM)*"
+    yield history + [{"role": "assistant", "content": bot}], ""
 
 
 # ─── Status bar ───────────────────────────────────────────────────────────────
@@ -501,6 +613,7 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
     _page    = gr.State(1)
     _palerts = gr.State([])
     _ctx     = gr.State("No alert selected.")
+    _alert   = gr.State({})
 
     # ── Header ───────────────────────────────────────────────────────────────
     with gr.Row(elem_classes="app-header"):
@@ -520,15 +633,32 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
                 elem_classes="status-bar",
             )
 
-    # ── Tabs ─────────────────────────────────────────────────────────────────
-    with gr.Tabs():
+    # ── Main layout: fixed preview on left, tabs on right ────────────────────
+    with gr.Row():
 
-        # ═══════════════════════ Tab 1: Alert List ═══════════════════════════
-        with gr.TabItem("📋  Alert List"):
-            with gr.Row():
+        # ── Left: always-visible preview panel ────────────────────────────
+        with gr.Column(scale=7):
+            video_out = gr.Video(
+                label="📹  Video Preview",
+                autoplay=True,
+                height=270,
+            )
+            detail_md = gr.Markdown(
+                "*Click a row in the table to preview the video and view alert details.*"
+            )
+            with gr.Accordion("🔧  Raw JSON", open=False):
+                json_out = gr.Textbox(
+                    value="{}", show_label=False,
+                    lines=22, max_lines=50,
+                    elem_classes="json-box",
+                )
 
-                # ── Left: controls + table + pagination ───────────────────
-                with gr.Column(scale=11):
+        # ── Right: tabs ───────────────────────────────────────────────────
+        with gr.Column(scale=11):
+            with gr.Tabs():
+
+                # ═══════════════════ Tab 1: Alert List ═══════════════════
+                with gr.TabItem("📋  Alert List"):
                     with gr.Row():
                         search_in   = gr.Textbox(
                             placeholder="🔍  Filter by sensor, type, description, ID…",
@@ -562,49 +692,32 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
                         btn_next = gr.Button("Next  ▶", variant="secondary",
                                              scale=1, min_width=90)
 
-                # ── Right: video + details ────────────────────────────────
-                with gr.Column(scale=7):
-                    video_out = gr.Video(
-                        label="📹  Video Preview",
-                        autoplay=True,
-                        height=270,
-                    )
-                    detail_md = gr.Markdown(
-                        "*Click a row in the table to preview the video and view alert details.*"
-                    )
-                    with gr.Accordion("🔧  Raw JSON", open=False):
-                        json_out = gr.Textbox(
-                            value="{}", show_label=False,
-                            lines=22, max_lines=50,
-                            elem_classes="json-box",
-                        )
-
-        # ═══════════════════════ Tab 2: Chat ═════════════════════════════════
-        with gr.TabItem("💬  Chat with VLM"):
-            with gr.Row():
-
-                with gr.Column(scale=3):
-                    chatbot = gr.Chatbot(label="Conversation", height=460)
+                # ═══════════════════ Tab 2: Chat ══════════════════════════
+                with gr.TabItem("💬  Chat with VLM"):
                     with gr.Row():
-                        chat_in  = gr.Textbox(
-                            placeholder="Ask about the selected alert or any surveillance question…",
-                            show_label=False, scale=5,
-                        )
-                        btn_send = gr.Button("Send ➤", variant="primary",
-                                             scale=1, min_width=80)
-                    btn_clr = gr.Button("🗑️  Clear conversation", variant="secondary")
 
-                with gr.Column(scale=1):
-                    gr.Markdown("### 📌  Alert Context")
-                    gr.Markdown(
-                        "Select an alert in the **Alert List** tab to provide "
-                        "context to the VLM chat."
-                    )
-                    ctx_box = gr.Textbox(
-                        value="No alert selected.",
-                        interactive=False, lines=18, show_label=False,
-                        elem_classes="ctx-box",
-                    )
+                        with gr.Column(scale=3):
+                            chatbot = gr.Chatbot(label="Conversation", height=460)
+                            with gr.Row():
+                                chat_in  = gr.Textbox(
+                                    placeholder="Ask about the selected alert or any surveillance question…",
+                                    show_label=False, scale=5,
+                                )
+                                btn_send = gr.Button("Send ➤", variant="primary",
+                                                     scale=1, min_width=80)
+                            btn_clr = gr.Button("🗑️  Clear conversation", variant="secondary")
+
+                        with gr.Column(scale=1):
+                            gr.Markdown("### 📌  Alert Context")
+                            gr.Markdown(
+                                "Select an alert in the **Alert List** tab to provide "
+                                "context to the VLM chat."
+                            )
+                            ctx_box = gr.Textbox(
+                                value="No alert selected.",
+                                interactive=False, lines=18, show_label=False,
+                                elem_classes="ctx-box",
+                            )
 
     # ═══ Event wiring ════════════════════════════════════════════════════════
 
@@ -635,15 +748,15 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
     # Row click → video + details + sync chat context
     tbl.select(fn=select_alert,
                inputs=[_palerts],
-               outputs=[video_out, detail_md, json_out, _ctx])
+               outputs=[video_out, detail_md, json_out, _ctx, _alert])
     _ctx.change(fn=lambda c: c, inputs=[_ctx], outputs=[ctx_box])
 
     # Chat
     btn_send.click(fn=send_chat,
-                   inputs=[chat_in, chatbot, _ctx],
+                   inputs=[chat_in, chatbot, _ctx, _alert],
                    outputs=[chatbot, chat_in])
     chat_in.submit(fn=send_chat,
-                   inputs=[chat_in, chatbot, _ctx],
+                   inputs=[chat_in, chatbot, _ctx, _alert],
                    outputs=[chatbot, chat_in])
     btn_clr.click(fn=lambda: [], outputs=[chatbot])
 
