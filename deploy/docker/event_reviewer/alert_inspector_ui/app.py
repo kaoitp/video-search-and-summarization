@@ -17,6 +17,7 @@ import shutil
 import threading
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import gradio as gr
 import requests
@@ -249,10 +250,15 @@ _PREVIEW_DIR = "/tmp/alert-previews"
 os.makedirs(_PREVIEW_DIR, exist_ok=True)
 
 
-def _fmt_ts(ts: str) -> str:
+def _fmt_ts(ts: str, tz_name: str = "UTC") -> str:
     try:
-        return (datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                .strftime("%Y-%m-%d %H:%M:%S"))
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        try:
+            tz = ZoneInfo(tz_name)
+            dt = dt.astimezone(tz)
+        except Exception:
+            pass
+        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
     except Exception:
         return ts or "—"
 
@@ -287,7 +293,7 @@ def _video_path(alert: dict) -> str | None:
 
 
 # ─── Pagination ───────────────────────────────────────────────────────────────
-def load_page(page: int, search: str, force_fetch: bool = False):
+def load_page(page: int, search: str, force_fetch: bool = False, tz: str = "UTC"):
     fetch_msg = ""
     if force_fetch or len(_store) == 0:
         fetch_msg = _fetch_redis_all()
@@ -323,7 +329,7 @@ def load_page(page: int, search: str, force_fetch: bool = False):
         ver = res.get("verification_result")
         rows.append([
             (a.get("id") or "")[:12],
-            _fmt_ts(a.get("@timestamp", "")),
+            _fmt_ts(a.get("@timestamp", ""), tz),
             a.get("sensor_id",   "") or "—",
             a.get("stream_name", "") or "—",
             f"{SEV_ICON.get(sev,'⚫')} {sev}" if sev else "—",
@@ -338,7 +344,7 @@ def load_page(page: int, search: str, force_fetch: bool = False):
 
 
 # ─── Row selection ────────────────────────────────────────────────────────────
-def select_alert(evt: gr.SelectData, page_alerts: list):
+def select_alert(evt: gr.SelectData, page_alerts: list, tz: str = "UTC"):
     idx = evt.index[0]
     if not page_alerts or not (0 <= idx < len(page_alerts)):
         return None, "*Select a row to preview details.*", "{}", "No alert selected.", {}
@@ -354,7 +360,7 @@ def select_alert(evt: gr.SelectData, page_alerts: list):
 
 | | |
 |:---|:---|
-| **Timestamp** | {_fmt_ts(a.get("@timestamp", "—"))} |
+| **Timestamp** | {_fmt_ts(a.get("@timestamp", "—"), tz)} |
 | **Sensor ID** | `{a.get("sensor_id", "—")}` |
 | **Stream** | {a.get("stream_name", "—")} |
 
@@ -614,6 +620,7 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
     _palerts = gr.State([])
     _ctx     = gr.State("No alert selected.")
     _alert   = gr.State({})
+    _tz      = gr.State("UTC")
 
     # ── Header ───────────────────────────────────────────────────────────────
     with gr.Row(elem_classes="app-header"):
@@ -723,31 +730,39 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
 
     OUTPUTS = [tbl, pg_info, _page, _palerts, fetch_status_box]
 
-    def _load(page, search, force=False):
-        return load_page(page, search, force_fetch=force)
+    def _load(page, search, force=False, tz="UTC"):
+        return load_page(page, search, force_fetch=force, tz=tz)
 
-    # Initial load — force fetch from Redis
-    demo.load(fn=lambda: _load(1, "", force=True), outputs=OUTPUTS)
+    # Initial load — detect browser timezone + force fetch from Redis
+    def _init(tz: str = "UTC"):
+        rows, info, page, chunk, msg = load_page(1, "", force_fetch=True, tz=tz)
+        return tz, rows, info, page, chunk, msg
+
+    demo.load(
+        fn=_init,
+        outputs=[_tz] + OUTPUTS,
+        js="() => [Intl.DateTimeFormat().resolvedOptions().timeZone]",
+    )
 
     # Refresh — force fetch
-    btn_refresh.click(fn=lambda s: _load(1, s, force=True),
-                      inputs=[search_in], outputs=OUTPUTS)
+    btn_refresh.click(fn=lambda s, tz: _load(1, s, force=True, tz=tz),
+                      inputs=[search_in, _tz], outputs=OUTPUTS)
 
     # Search — filter existing store
-    btn_search.click(fn=lambda s: _load(1, s),
-                     inputs=[search_in], outputs=OUTPUTS)
-    search_in.submit(fn=lambda s: _load(1, s),
-                     inputs=[search_in], outputs=OUTPUTS)
+    btn_search.click(fn=lambda s, tz: _load(1, s, tz=tz),
+                     inputs=[search_in, _tz], outputs=OUTPUTS)
+    search_in.submit(fn=lambda s, tz: _load(1, s, tz=tz),
+                     inputs=[search_in, _tz], outputs=OUTPUTS)
 
     # Pagination
-    btn_prev.click(fn=lambda pg, s: _load(max(1, pg - 1), s),
-                   inputs=[_page, search_in], outputs=OUTPUTS)
-    btn_next.click(fn=lambda pg, s: _load(pg + 1, s),
-                   inputs=[_page, search_in], outputs=OUTPUTS)
+    btn_prev.click(fn=lambda pg, s, tz: _load(max(1, pg - 1), s, tz=tz),
+                   inputs=[_page, search_in, _tz], outputs=OUTPUTS)
+    btn_next.click(fn=lambda pg, s, tz: _load(pg + 1, s, tz=tz),
+                   inputs=[_page, search_in, _tz], outputs=OUTPUTS)
 
     # Row click → video + details + sync chat context
     tbl.select(fn=select_alert,
-               inputs=[_palerts],
+               inputs=[_palerts, _tz],
                outputs=[video_out, detail_md, json_out, _ctx, _alert])
     _ctx.change(fn=lambda c: c, inputs=[_ctx], outputs=[ctx_box])
 
