@@ -499,8 +499,7 @@ def send_chat(user_msg: str, history: list, ctx: str, alert: dict):
         with requests.post(
             f"{VSS_URL}/summarize",
             json={"id": via_id, "model": _get_vlm_model(),
-                  "prompt": prompt, "stream": True, "max_tokens": 512,
-                  "num_frames": 6},
+                  "prompt": prompt, "stream": True, "max_tokens": 512},
             stream=True, timeout=600,
         ) as r:
             if not r.ok:
