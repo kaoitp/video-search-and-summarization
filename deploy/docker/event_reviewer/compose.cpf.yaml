@@ -143,6 +143,8 @@ services:
 
   alert-inspector-ui:
     image: ${ALERT_INSPECTOR_UI_IMAGE:-nvcr.io/nvidia/blueprint/vss-alert-inspector-ui:2.4.1}
+    build:
+      context: ./alert_inspector_ui
     networks:
       - vss-shared-network
     volumes:
