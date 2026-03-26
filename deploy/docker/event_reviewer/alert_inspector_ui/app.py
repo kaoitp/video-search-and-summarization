@@ -330,11 +330,7 @@ def load_page(page: int, search: str, force_fetch: bool = False, tz: str = "UTC"
         rows.append([
             (a.get("id") or "")[:12],
             _fmt_ts(a.get("@timestamp", ""), tz),
-            a.get("sensor_id",   "") or "—",
             a.get("stream_name", "") or "—",
-            f"{SEV_ICON.get(sev,'⚫')} {sev}" if sev else "—",
-            ai.get("type",   "") or "—",
-            ai.get("status", "") or "—",
             f"{VLM_ICON.get(vlm,'⏳')} {vlm}" if vlm else "⏳ PENDING",
             "✅" if ver is True else ("❌" if ver is False else "—"),
         ])
@@ -689,9 +685,8 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
                     )
 
                     tbl = gr.Dataframe(
-                        headers=["ID", "Timestamp", "Sensor", "Stream",
-                                 "Severity", "Type", "Alert Status", "VLM Result", "Verified"],
-                        datatype=["str"] * 9,
+                        headers=["ID", "Timestamp", "Stream", "VLM Result", "Verified"],
+                        datatype=["str"] * 5,
                         interactive=False,
                         elem_classes="alert-tbl",
                     )
