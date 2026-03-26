@@ -22,6 +22,13 @@ from zoneinfo import ZoneInfo
 import gradio as gr
 import requests
 
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    _NVML_OK = True
+except Exception:
+    _NVML_OK = False
+
 # ─── Configuration (from environment — no compose edits needed) ───────────────
 ALERT_BRIDGE_WS_URL = os.environ.get("ALERT_BRIDGE_BASE_URL", "ws://alert-bridge:9080")
 ALERT_BRIDGE_HTTP   = (ALERT_BRIDGE_WS_URL
@@ -565,6 +572,36 @@ def get_status() -> str:
     return "  |  ".join(parts)
 
 
+# ─── GPU Stats ────────────────────────────────────────────────────────────────
+def get_gpu_stats() -> str:
+    if not _NVML_OK:
+        return "GPU: N/A"
+    try:
+        lines = []
+        count = pynvml.nvmlDeviceGetCount()
+        for i in range(count):
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            util  = pynvml.nvmlDeviceGetUtilizationRates(h)
+            mem   = pynvml.nvmlDeviceGetMemoryInfo(h)
+            power = pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0          # mW → W
+            try:
+                power_limit = pynvml.nvmlDeviceGetEnforcedPowerLimit(h) / 1000.0
+                power_str = f"{power:.0f}/{power_limit:.0f} W"
+            except Exception:
+                power_str = f"{power:.0f} W"
+            vram_used  = mem.used  / 1024**3
+            vram_total = mem.total / 1024**3
+            prefix = f"GPU{i} " if count > 1 else ""
+            lines.append(
+                f"{prefix}🖥 Util {util.gpu}%  "
+                f"💾 VRAM {vram_used:.1f}/{vram_total:.0f} GB  "
+                f"⚡ {power_str}"
+            )
+        return "  |  ".join(lines)
+    except Exception as e:
+        return f"GPU: error ({e})"
+
+
 # ─── CSS ──────────────────────────────────────────────────────────────────────
 CSS = """
 footer { display: none !important; }
@@ -582,6 +619,15 @@ footer { display: none !important; }
     font-size: 0.78rem !important;
     background: #111122 !important;
     color: #00ff9d !important;
+    border-color: #334 !important;
+    border-radius: 6px !important;
+}
+
+.gpu-bar textarea {
+    font-family: 'Courier New', monospace !important;
+    font-size: 0.78rem !important;
+    background: #111122 !important;
+    color: #ffdd88 !important;
     border-color: #334 !important;
     border-radius: 6px !important;
 }
@@ -643,6 +689,12 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
                 value=get_status, every=30,
                 interactive=False, show_label=False,
                 elem_classes="status-bar",
+            )
+        with gr.Column(scale=2):
+            gpu_box = gr.Textbox(
+                value=get_gpu_stats, every=1,
+                interactive=False, show_label=False,
+                elem_classes="gpu-bar",
             )
 
     # ── Main layout: fixed preview on left, tabs on right ────────────────────
