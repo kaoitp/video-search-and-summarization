@@ -591,11 +591,13 @@ footer { display: none !important; }
     font-size: 0.78rem !important;
 }
 
-.page-counter input, .page-counter textarea {
+.page-counter, .page-counter p {
     text-align: center !important;
     font-weight: 700 !important;
     font-size: 0.95rem !important;
-    background: #f0f4ff !important;
+    color: #ddeeff !important;
+    align-self: center !important;
+    margin: 0 !important;
 }
 
 .json-box textarea {
@@ -689,17 +691,8 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
                         datatype=["str"] * 5,
                         interactive=False,
                         elem_classes="alert-tbl",
+                        max_height=420,
                     )
-
-                    with gr.Row():
-                        btn_prev = gr.Button("◀  Prev",  variant="secondary",
-                                             scale=1, min_width=90)
-                        pg_info  = gr.Textbox(
-                            value="—", show_label=False, interactive=False,
-                            scale=4, elem_classes="page-counter",
-                        )
-                        btn_next = gr.Button("Next  ▶", variant="secondary",
-                                             scale=1, min_width=90)
 
                 # ═══════════════════ Tab 2: Chat ══════════════════════════
                 with gr.TabItem("💬  Chat with VLM"):
@@ -727,6 +720,16 @@ with gr.Blocks(title="🚨 Alert Inspector") as demo:
                                 interactive=False, lines=18, show_label=False,
                                 elem_classes="ctx-box",
                             )
+
+            with gr.Row(elem_classes="pagination-row"):
+                btn_prev = gr.Button("◀  Prev",  variant="secondary",
+                                     scale=1, min_width=90)
+                pg_info  = gr.Markdown(
+                    value="—",
+                    elem_classes="page-counter",
+                )
+                btn_next = gr.Button("Next  ▶", variant="secondary",
+                                     scale=1, min_width=90)
 
     # ═══ Event wiring ════════════════════════════════════════════════════════
 
