@@ -17,6 +17,9 @@ from gi.repository import Gst, GObject, GstBase, GLib
 
 import torch
 import numpy as np
+import os
+import json
+import time
 #from pyservicemaker import Buffer, BufferProvider, as_tensor, ColorFormat, Pipeline, Feeder
 import pyds
 from typing import Any, Optional
@@ -36,6 +39,12 @@ PGIE_CLASS_ID_VEHICLE = 0
 PGIE_CLASS_ID_BICYCLE = 1
 PGIE_CLASS_ID_PERSON = 2
 PGIE_CLASS_ID_ROADSIGN = 3
+
+# Zone debounce: minimum nanoseconds between consecutive events on the same zone
+ZONE_DEBOUNCE_NS = 3_000_000_000  # 3 seconds
+
+# Seconds of silence before stopping a clip recording
+CACHE_STOP_TIMEOUT_NS = 2_000_000_000  # 2 seconds
 
 class EventGenerator(GstBase.BaseTransform):
     """
@@ -174,6 +183,14 @@ class EventGenerator(GstBase.BaseTransform):
         self.frame_number: int = 0
         self._gpu_id: int = 0
 
+        # Per-zone line-crossing state
+        self.zone_last_pts: dict = {}       # zone_name -> last trigger PTS (ns)
+
+        # Redis fast-output client (lazy init, None = not tried, False = unavailable)
+        self._redis_client = None
+        self._stream_id: str = os.environ.get('CV_STREAM_ID', 'unknown')
+        self._fast_event_channel: str = os.environ.get('CV_FAST_EVENT_CHANNEL', 'cv:fast_events')
+
         np.random.seed(1000)
         self.rgb_array = np.random.random((1000, 3))
         self.perf_data = None
@@ -217,6 +234,8 @@ class EventGenerator(GstBase.BaseTransform):
         self.eos_received: bool = False
         self.buffer_pts: int = 0
         self.frame_num: int = 0
+        self.cache_event_pts: int = 0
+        self.zone_last_pts = {}  # reset per-zone debounce on restart
 
         # Initialize the buffer queue WITHOUT fixed size so we can control dequeuing
         self.processed_buffer_count: int = 0
@@ -316,6 +335,51 @@ class EventGenerator(GstBase.BaseTransform):
 
 
         return Gst.FlowReturn.EOS
+
+    # ------------------------------------------------------------------
+    # Redis fast-output helpers
+    # ------------------------------------------------------------------
+
+    def _get_redis(self):
+        """Lazy-init Redis client.  Returns client or None if unavailable."""
+        if self._redis_client is None:
+            try:
+                import redis as redis_lib
+                host = os.environ.get('REDIS_HOST', 'redis')
+                port = int(os.environ.get('REDIS_PORT', '6379'))
+                client = redis_lib.Redis(
+                    host=host, port=port,
+                    decode_responses=True,
+                    socket_connect_timeout=2,
+                )
+                client.ping()
+                self._redis_client = client
+                Gst.info(f"Redis connected at {host}:{port}")
+            except Exception as e:
+                Gst.warning(f"Redis unavailable, fast events disabled: {e}")
+                self._redis_client = False  # mark as permanently unavailable
+        return self._redis_client if self._redis_client else None
+
+    def _publish_fast_event(self, zone_name: str, pts_ns: int) -> None:
+        """Publish a fast-path zone event to Redis immediately upon detection."""
+        severity = "DANGER" if "danger" in zone_name.lower() else "WARNING"
+        payload = json.dumps({
+            "zone": zone_name,
+            "severity": severity,
+            "stream_id": self._stream_id,
+            "timestamp": time.time(),
+            "pts_ns": pts_ns,
+        })
+        try:
+            r = self._get_redis()
+            if r:
+                r.publish(self._fast_event_channel, payload)
+                r.xadd('cv:fast_events_stream', {'event': payload}, maxlen=1000)
+                # Store last zone per stream so the watcher can look it up
+                r.set(f'cv:last_zone:{self._stream_id}', zone_name, ex=300)
+                Gst.info(f"Fast event published: zone={zone_name} severity={severity}")
+        except Exception as e:
+            Gst.warning(f"Failed to publish fast event: {e}")
 
     def do_transform_ip(self, gst_buffer: Gst.Buffer) -> Gst.FlowReturn:
         """
@@ -520,61 +584,46 @@ class EventGenerator(GstBase.BaseTransform):
                         #if user_meta_data.objInROIcnt: print("Objs in ROI: {0}".format(user_meta_data.objInROIcnt))                    
                         #if user_meta_data.objLCCumCnt: print("Linecrossing Cumulative: {0}".format(user_meta_data.objLCCumCnt))
                         src_pad = self.srcpad
-                        if user_meta_data.ocStatus['OC']:  
+                        current_pts = gst_buffer.pts
+
+                        # --- Line-crossing detection (Warning / Danger zones) ---
+                        lc_counts = user_meta_data.objLCCurrCnt or {}
+                        any_crossing = False
+                        for zone_name, count in lc_counts.items():
+                            if count > 0:
+                                last_pts = self.zone_last_pts.get(zone_name, 0)
+                                if current_pts - last_pts >= ZONE_DEBOUNCE_NS:
+                                    # Fast path: publish to Redis immediately
+                                    self._publish_fast_event(zone_name, current_pts)
+                                    self.zone_last_pts[zone_name] = current_pts
+                                    any_crossing = True
+                                    print(f"=== Line crossing: zone={zone_name} count={count} stream={self._stream_id}", flush=True)
+
+                        if any_crossing:
                             if self.cache_data_event_sent is not True:
+                                # Start clip recording
                                 event_structure = Gst.Structure.new_empty("cache-data")
                                 custom_event = Gst.Event.new_custom(Gst.EventType.CUSTOM_DOWNSTREAM, event_structure)
-                                self.cache_event_pts = gst_buffer.pts
-
+                                self.cache_event_pts = current_pts
                                 if src_pad:
                                     result = src_pad.push_event(custom_event)
-                                    if result:
-                                        print("===================CustomLib: cache-data event for overcrowding sent downstream successfully",flush=True)
-                                    else:
-                                        print("===================CustomLib: Failed to send cache-data event for overcrowding downstream",flush=True)
-                                else:
-                                    print("CustomLib: Could not get source pad to send custom event",flush=True)
-
+                                    print(f"=== cache-data event sent: {result}", flush=True)
                                 self.cache_frame_number = 1
                                 self.cache_data_event_sent = True
                             else:
-                                self.cache_event_pts = gst_buffer.pts
+                                # Extend the recording window
+                                self.cache_event_pts = current_pts
 
-                        elif self.cache_data_event_sent and  self.cache_event_pts + 2_000_000_000 <= gst_buffer.pts:
+                        elif self.cache_data_event_sent and self.cache_event_pts + CACHE_STOP_TIMEOUT_NS <= current_pts:
+                            # No crossing for 2 s — finalize clip
                             event_structure = Gst.Structure.new_empty("stop-cache-data")
                             custom_event = Gst.Event.new_custom(Gst.EventType.CUSTOM_DOWNSTREAM, event_structure)
                             if src_pad:
                                 result = src_pad.push_event(custom_event)
-                                if result:
-                                    print("===================CustomLib: stop-cache-data event for overcrowding sent downstream successfully",flush=True)
-                                else:
-                                    print("===================CustomLib: Failed to send stop-cache-data event for overcrowding downstream",flush=True)
+                                print(f"=== stop-cache-data event sent: {result}", flush=True)
                             self.cache_data_event_sent = False
                             self.cache_frame_number = 0
-                            self.cache_event_pts = gst_buffer.pts
-                        #elif self.cache_data_event_sent:
-                        #    self.cache_frame_number += 1
- 
-                        '''
-                        if user_meta_data.objLCCurrCnt: 
-                            #print("===============Linecrossing Current Frame: {0}".format(user_meta_data.objLCCurrCnt))
-                            #print("===============cache_frame_number: {0}".format(self.cache_frame_number))
-                            if self.cache_frame_number == 0 and user_meta_data.objLCCurrCnt['Exit'] > 0:
-                                event_structure = Gst.Structure.new_empty("cache-data")
-                                custom_event = Gst.Event.new_custom(Gst.EventType.CUSTOM_DOWNSTREAM, event_structure)
-                                src_pad = self.srcpad
-                                if src_pad:
-                                    result = src_pad.push_event(custom_event)
-                                    if result:
-                                        print("===================CustomLib: cache-data event sent downstream successfully")
-                                    else:
-                                        print("===================CustomLib: Failed to send cache-data event downstream")
-                                else:
-                                    print("CustomLib: Could not get source pad to send custom event")
-
-                                self.cache_frame_number += 1
-                                self.cache_data_event_sent = True
-                        '''
+                            self.cache_event_pts = current_pts
                 except StopIteration:
                     break
                 try:

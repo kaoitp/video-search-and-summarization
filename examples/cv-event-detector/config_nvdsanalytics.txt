@@ -15,8 +15,8 @@
 # limitations under the License.
 ################################################################################
 
-# The values in the config file are overridden by values set through GObject
-# properties.
+# Default template config — per-stream configs are generated dynamically at
+# /tmp/config_nvdsanalytics_<stream_id>.txt with actual zone coordinates.
 
 [property]
 enable=1
@@ -31,35 +31,30 @@ osd-mode=2
 display-font-size=12
 
 ## Per stream configuration
+
 [roi-filtering-stream-0]
-#enable or disable following feature
 enable=0
-#ROI to filter select objects, and remove from meta data
 roi-RF=295;643;579;634;642;913;56;828
-#remove objects in the ROI
 inverse-roi=0
 class-id=-1
 
 
 [overcrowding-stream-0]
-#enable or disable following feature
-enable=1
-#ROI to filter select objects, and remove from meta data
-#roi-OC=295;643;579;634;642;913;56;828
+enable=0
 roi-OC=0;0;1919;0;1919;1079;0;1079
-#remove objects in the ROI
-#inverse-roi=0
 object-threshold=1
 class-id=-1
-#roi-latency=100
 
 
+# Line-crossing zones: Warning (yellow) and Danger (red)
+# Coordinates will be overridden per-stream by generate_linecrossing_config()
+# Format: line-crossing-<Label>=x1;y1;x2;y2;x3;y3;x4;y4
+#         where (x1,y1)-(x2,y2) and (x3,y3)-(x4,y4) form the crossing band
 [line-crossing-stream-0]
-enable=0
-#Label;direction;lc
-#line-crossing-Entry=1072;911;1143;1058;944;1020;1297;1020;
-line-crossing-Exit=789;672;1084;900;851;773;1203;732
-class-id=0
+enable=1
+line-crossing-Warning=0;540;1919;540;0;530;1919;530
+line-crossing-Danger=0;700;1919;700;0;690;1919;690
+class-id=2
 #extended when 0- only counts crossing on the configured Line
 #              1- assumes extended Line crossing counts all the crossing
 extended=0
@@ -67,5 +62,4 @@ extended=0
 #loose   : counts all crossing without strong adherence to direction
 #balanced: Strict direction adherence expected compared to mode=loose
 #strict  : Strict direction adherence expected compared to mode=balanced
-mode=loose
-
+mode=balanced

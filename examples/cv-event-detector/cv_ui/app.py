@@ -37,7 +37,7 @@ def _delete(path, payload=None):
 _watchers: dict[str, dict] = {}
 _watchers_lock = threading.Lock()
 
-# local cache: pipeline_id → name  (populated when pipeline is created via this UI)
+# local cache: pipeline_id → name
 _pipeline_names: dict[str, str] = {}
 
 ALERT_ENDPOINT = "/api/v1/alerts"
@@ -45,7 +45,6 @@ ALERT_ENDPOINT = "/api/v1/alerts"
 
 def get_hw_status():
     parts = []
-    # GPU via nvidia-smi — try PATH then common container locations
     _smi = next(
         (p for p in ["nvidia-smi", "/usr/bin/nvidia-smi", "/usr/local/bin/nvidia-smi"]
          if os.path.isfile(p) or subprocess.run(["which", p], capture_output=True).returncode == 0),
@@ -66,12 +65,12 @@ def get_hw_status():
             parts.append(f"GPU{idx} [{name}]  {mu}/{mt} MB ({pct})  util {util}%  {temp}°C")
     except Exception as e:
         parts.append(f"GPU: N/A ({e})")
-    # Watchers
     with _watchers_lock:
         n = len(_watchers)
     if n:
         parts.append(f"🤖 {n} watcher active")
     return "   |   ".join(parts) if parts else "Hardware info unavailable"
+
 
 def _build_event_payload(video_path, sensor_id, stream_name,
                           prompt, system_prompt,
@@ -115,13 +114,37 @@ def _build_event_payload(video_path, sensor_id, stream_name,
     }
 
 
+# ---------------------------------------------------------------------------
+# Redis zone lookup — used by watcher to pick the right per-zone prompt
+# ---------------------------------------------------------------------------
+
+def _get_zone_from_redis(stream_id: str) -> str:
+    """Return the last triggered zone name for this stream (from Redis).
+    Falls back to 'Warning' if Redis is unavailable."""
+    try:
+        import redis as redis_lib
+        host = os.environ.get("REDIS_HOST", "redis")
+        port = int(os.environ.get("REDIS_PORT", "6379"))
+        r = redis_lib.Redis(host=host, port=port, decode_responses=True,
+                            socket_connect_timeout=1)
+        return r.get(f"cv:last_zone:{stream_id}") or "Warning"
+    except Exception:
+        return "Warning"
+
+
+# ---------------------------------------------------------------------------
+# Background watcher — polls info.txt and auto-submits clips to alert-bridge
+# ---------------------------------------------------------------------------
+
 def _watcher_loop(stream_id: str, output_folder: str, sensor_id: str,
-                  stream_name: str, prompt: str, system_prompt: str,
+                  stream_name: str,
+                  warning_prompt: str, danger_prompt: str, system_prompt: str,
                   event_type: str, severity: str,
                   chunk_duration: int, num_frames: int, enable_reasoning: bool,
                   do_verification: bool,
                   stop_event: threading.Event, poll_sec: int = 5):
-    """Background thread: poll info.txt, auto-submit new clips to alert-bridge."""
+    """Background thread: poll info.txt, auto-submit new clips to alert-bridge.
+    Uses warning_prompt or danger_prompt depending on the zone stored in Redis."""
     submitted: set[str] = set()
     info_path = os.path.join(output_folder, "info.txt")
     _log(stream_id, f"Watcher started — watching {info_path} every {poll_sec}s")
@@ -138,11 +161,26 @@ def _watcher_loop(stream_id: str, output_folder: str, sensor_id: str,
                     continue
                 video_path = os.path.join(output_folder, clip + ".mp4")
                 if not os.path.exists(video_path):
-                    continue  # still writing
+                    continue
+
+                # Pick prompt based on which zone triggered (Redis lookup)
+                zone = _get_zone_from_redis(stream_id)
+                if "danger" in zone.lower() and danger_prompt and danger_prompt.strip():
+                    active_prompt = danger_prompt.strip()
+                    active_event_type = "line_crossing_danger"
+                else:
+                    active_prompt = warning_prompt.strip() if warning_prompt else ""
+                    active_event_type = event_type or "line_crossing_warning"
+
+                if not active_prompt:
+                    _log(stream_id, f"⚠️ Skipping {clip}.mp4 — no prompt for zone={zone}")
+                    submitted.add(clip)
+                    continue
+
                 payload = _build_event_payload(
                     video_path, sensor_id, stream_name,
-                    prompt, system_prompt,
-                    event_type, severity,
+                    active_prompt, system_prompt,
+                    active_event_type, severity,
                     chunk_duration, num_frames, enable_reasoning,
                     do_verification,
                 )
@@ -157,7 +195,7 @@ def _watcher_loop(stream_id: str, output_folder: str, sensor_id: str,
 
                 submitted.add(clip)
                 icon = "✅" if ok else "❌"
-                _log(stream_id, f"{icon} {clip}.mp4 → {status}")
+                _log(stream_id, f"{icon} [{zone}] {clip}.mp4 → {status}")
 
         except Exception as e:
             _log(stream_id, f"⚠️ watcher error: {e}")
@@ -172,21 +210,21 @@ def _log(stream_id: str, msg: str):
     with _watchers_lock:
         if stream_id in _watchers:
             _watchers[stream_id]["log"].append(line)
-            # keep last 200 lines
             _watchers[stream_id]["log"] = _watchers[stream_id]["log"][-200:]
 
 
 def start_watcher(stream_id: str, output_folder: str, sensor_id: str,
-                  stream_name: str, prompt: str, system_prompt: str,
+                  stream_name: str,
+                  warning_prompt: str, danger_prompt: str, system_prompt: str,
                   event_type: str, severity: str,
                   chunk_duration: int, num_frames: int, enable_reasoning: bool,
-                  do_verification: bool,
-                  poll_sec: int = 5):
+                  do_verification: bool, poll_sec: int = 5):
     stop_event = threading.Event()
     t = threading.Thread(
         target=_watcher_loop,
         args=(stream_id, output_folder, sensor_id, stream_name,
-              prompt, system_prompt, event_type, severity,
+              warning_prompt, danger_prompt, system_prompt,
+              event_type, severity,
               chunk_duration, num_frames, enable_reasoning,
               do_verification,
               stop_event, poll_sec),
@@ -198,7 +236,8 @@ def start_watcher(stream_id: str, output_folder: str, sensor_id: str,
             "thread": t,
             "stop_event": stop_event,
             "output_folder": output_folder,
-            "prompt": prompt,
+            "warning_prompt": warning_prompt,
+            "danger_prompt": danger_prompt,
             "log": [],
         }
     t.start()
@@ -229,8 +268,9 @@ def get_watcher_status_table():
         for sid, entry in _watchers.items():
             alive = "🟢 running" if entry["thread"].is_alive() else "🔴 stopped"
             folder = entry.get("output_folder", "")
-            prompt_preview = (entry.get("prompt") or "")[:40]
-            rows.append([sid, alive, folder, prompt_preview])
+            wp = (entry.get("warning_prompt") or "")[:30]
+            dp = (entry.get("danger_prompt") or "")[:30]
+            rows.append([sid, alive, folder, wp, dp])
     return rows
 
 # ---------------------------------------------------------------------------
@@ -269,7 +309,6 @@ def create_pipeline(name, endpoint_url, pipeline_type,
 def delete_pipeline(pipeline_id):
     if not pipeline_id:
         return "❌ กรุณาระบุ Pipeline ID", gr.update()
-    # extract raw id if in "name · id" format
     pid = pipeline_id.split(" · ")[-1].strip() if " · " in pipeline_id else pipeline_id.strip()
     try:
         r = _delete("/api/pipeline", {"id": pid, "cleanup_resources": True})
@@ -299,7 +338,6 @@ def _pipeline_choices():
 
 
 def _extract_pipeline_id(label: str) -> str:
-    """Extract raw pipeline ID from a dropdown label like 'name · id'."""
     return label.split(" · ")[-1].strip() if label else ""
 
 
@@ -321,6 +359,17 @@ def get_pipelines_table():
         return []
 
 # ---------------------------------------------------------------------------
+# Zone coordinate helpers
+# ---------------------------------------------------------------------------
+
+def _parse_line_coords(x1, y1, x2, y2):
+    """Return [x1,y1,x2,y2] as ints, or None if all zero (= disabled)."""
+    coords = [int(x1), int(y1), int(x2), int(y2)]
+    if coords == [0, 0, 0, 0]:
+        return None
+    return coords
+
+# ---------------------------------------------------------------------------
 # Combined setup: create pipeline + add all streams in one call
 # ---------------------------------------------------------------------------
 
@@ -329,13 +378,14 @@ def setup_pipeline_and_streams(
     min_clip, max_clip, frame_skip, min_detect,
     streams_df,
     detection_classes, box_threshold,
-    roi_x, roi_y, roi_w, roi_h,
+    warn_x1, warn_y1, warn_x2, warn_y2,
+    dang_x1, dang_y1, dang_x2, dang_y2,
     auto_review, poll_sec,
-    vlm_prompt, vlm_system_prompt,
+    warning_prompt, danger_prompt, vlm_system_prompt,
     event_type, severity,
     chunk_duration, num_frames, enable_reasoning, do_verification,
+    fast_event_channel,
 ):
-    # Step 1: Create pipeline
     pipeline_payload = {
         "name": name.strip(),
         "endpoint_url": endpoint_url.strip() if endpoint_url.strip() else None,
@@ -358,13 +408,11 @@ def setup_pipeline_and_streams(
 
     lines = [f"✅ Pipeline สร้างสำเร็จ\nID: {pipeline_id}\n"]
 
-    # Step 2: Shared CV params
     classes = [c.strip() for c in detection_classes.strip().splitlines() if c.strip()]
     cv_prompt = " . ".join(classes) if classes else None
-    has_roi = int(roi_w) > 0 and int(roi_h) > 0
-    gdino_rois = [[int(roi_x), int(roi_y), int(roi_w), int(roi_h)]] if has_roi else [[]]
+    warning_line = _parse_line_coords(warn_x1, warn_y1, warn_x2, warn_y2)
+    danger_line = _parse_line_coords(dang_x1, dang_y1, dang_x2, dang_y2)
 
-    # Step 3: Add each stream row
     rows_iter = [dict(row) for _, row in streams_df.iterrows()] if isinstance(streams_df, pd.DataFrame) else streams_df
     added = 0
     for row in rows_iter:
@@ -378,6 +426,17 @@ def setup_pipeline_and_streams(
         ts_tag           = datetime.now().strftime("%Y%m%d_%H%M%S")
         stream_subfolder = os.path.join(DEFAULT_OUTPUT_FOLDER, f"{safe_name}_{ts_tag}")
 
+        cv_params = {
+            "gdinoprompt": cv_prompt,
+            "gdinothreshold": float(box_threshold),
+            "gdino_rois": [[]],
+            "fast_event_channel": fast_event_channel or "cv:fast_events",
+        }
+        if warning_line:
+            cv_params["warning_line"] = warning_line
+        if danger_line:
+            cv_params["danger_line"] = danger_line
+
         stream_payload = {
             "version": "1.0",
             "stream_url": stream_url,
@@ -386,11 +445,7 @@ def setup_pipeline_and_streams(
             "sensor_id": sensor_id,
             "stream_name": safe_name,
             "processing_state": "enabled",
-            "cv_params": {
-                "gdinoprompt": cv_prompt,
-                "gdinothreshold": float(box_threshold),
-                "gdino_rois": gdino_rois,
-            },
+            "cv_params": cv_params,
         }
         try:
             r = _post("/api/addstream", stream_payload)
@@ -398,15 +453,16 @@ def setup_pipeline_and_streams(
             if d.get("status") == "success":
                 sid = d["stream_id"]
                 watcher_note = ""
-                if auto_review and vlm_prompt.strip():
+                if auto_review and (warning_prompt.strip() or danger_prompt.strip()):
                     start_watcher(
                         stream_id=sid,
                         output_folder=stream_subfolder,
                         sensor_id=sensor_id,
                         stream_name=safe_name,
-                        prompt=vlm_prompt.strip(),
+                        warning_prompt=warning_prompt.strip(),
+                        danger_prompt=danger_prompt.strip(),
                         system_prompt=vlm_system_prompt.strip(),
-                        event_type=event_type.strip() or "event",
+                        event_type=event_type.strip() or "line_crossing",
                         severity=severity,
                         chunk_duration=int(chunk_duration),
                         num_frames=int(num_frames),
@@ -416,7 +472,7 @@ def setup_pipeline_and_streams(
                     )
                     watcher_note = "  🤖 Auto-Review เปิดแล้ว"
                 elif auto_review:
-                    watcher_note = "  ⚠️ Auto-Review: ต้องใส่ VLM Prompt"
+                    watcher_note = "  ⚠️ Auto-Review: ต้องใส่ Warning หรือ Danger Prompt"
                 lines.append(f"  ✅ [{stream_name}] {sid}{watcher_note}")
                 added += 1
             else:
@@ -432,11 +488,13 @@ def add_streams_to_pipeline(
     pipeline_label,
     streams_df,
     detection_classes, box_threshold,
-    roi_x, roi_y, roi_w, roi_h,
+    warn_x1, warn_y1, warn_x2, warn_y2,
+    dang_x1, dang_y1, dang_x2, dang_y2,
     auto_review, poll_sec,
-    vlm_prompt, vlm_system_prompt,
+    warning_prompt, danger_prompt, vlm_system_prompt,
     event_type, severity,
     chunk_duration, num_frames, enable_reasoning, do_verification,
+    fast_event_channel,
 ):
     pipeline_id = _extract_pipeline_id(pipeline_label) if pipeline_label else ""
     if not pipeline_id:
@@ -444,8 +502,8 @@ def add_streams_to_pipeline(
 
     classes = [c.strip() for c in detection_classes.strip().splitlines() if c.strip()]
     cv_prompt = " . ".join(classes) if classes else None
-    has_roi = int(roi_w) > 0 and int(roi_h) > 0
-    gdino_rois = [[int(roi_x), int(roi_y), int(roi_w), int(roi_h)]] if has_roi else [[]]
+    warning_line = _parse_line_coords(warn_x1, warn_y1, warn_x2, warn_y2)
+    danger_line = _parse_line_coords(dang_x1, dang_y1, dang_x2, dang_y2)
 
     rows_iter = [dict(row) for _, row in streams_df.iterrows()] if isinstance(streams_df, pd.DataFrame) else streams_df
     lines = []
@@ -461,6 +519,17 @@ def add_streams_to_pipeline(
         ts_tag           = datetime.now().strftime("%Y%m%d_%H%M%S")
         stream_subfolder = os.path.join(DEFAULT_OUTPUT_FOLDER, f"{safe_name}_{ts_tag}")
 
+        cv_params = {
+            "gdinoprompt": cv_prompt,
+            "gdinothreshold": float(box_threshold),
+            "gdino_rois": [[]],
+            "fast_event_channel": fast_event_channel or "cv:fast_events",
+        }
+        if warning_line:
+            cv_params["warning_line"] = warning_line
+        if danger_line:
+            cv_params["danger_line"] = danger_line
+
         payload = {
             "version": "1.0",
             "stream_url": stream_url,
@@ -469,11 +538,7 @@ def add_streams_to_pipeline(
             "sensor_id": sensor_id,
             "stream_name": safe_name,
             "processing_state": "enabled",
-            "cv_params": {
-                "gdinoprompt": cv_prompt,
-                "gdinothreshold": float(box_threshold),
-                "gdino_rois": gdino_rois,
-            },
+            "cv_params": cv_params,
         }
         try:
             r = _post("/api/addstream", payload)
@@ -481,15 +546,16 @@ def add_streams_to_pipeline(
             if d.get("status") == "success":
                 sid = d["stream_id"]
                 watcher_note = ""
-                if auto_review and vlm_prompt.strip():
+                if auto_review and (warning_prompt.strip() or danger_prompt.strip()):
                     start_watcher(
                         stream_id=sid,
                         output_folder=stream_subfolder,
                         sensor_id=sensor_id,
                         stream_name=safe_name,
-                        prompt=vlm_prompt.strip(),
+                        warning_prompt=warning_prompt.strip(),
+                        danger_prompt=danger_prompt.strip(),
                         system_prompt=vlm_system_prompt.strip(),
-                        event_type=event_type.strip() or "event",
+                        event_type=event_type.strip() or "line_crossing",
                         severity=severity,
                         chunk_duration=int(chunk_duration),
                         num_frames=int(num_frames),
@@ -499,7 +565,7 @@ def add_streams_to_pipeline(
                     )
                     watcher_note = "  🤖"
                 elif auto_review:
-                    watcher_note = "  ⚠️ (ต้องใส่ VLM Prompt)"
+                    watcher_note = "  ⚠️ (ต้องใส่ Prompt)"
                 lines.append(f"  ✅ [{stream_name}]  {sid}{watcher_note}")
                 added += 1
             else:
@@ -517,26 +583,36 @@ def add_streams_to_pipeline(
 
 def add_stream(pipeline_id, stream_url, sensor_id, stream_name, output_folder,
                detection_classes, box_threshold,
-               roi_x, roi_y, roi_w, roi_h,
-               vlm_prompt, vlm_system_prompt,
+               warn_x1, warn_y1, warn_x2, warn_y2,
+               dang_x1, dang_y1, dang_x2, dang_y2,
+               warning_prompt, danger_prompt, vlm_system_prompt,
                event_type, severity,
                chunk_duration, num_frames, enable_reasoning, do_verification,
-               poll_sec, auto_review):
+               poll_sec, auto_review, fast_event_channel):
     if not pipeline_id:
         return "❌ กรุณาเลือก Pipeline ก่อน"
     if not stream_url.strip():
         return "❌ กรุณาระบุ Stream URL"
 
-    # Build subfolder per stream so info.txt files don't collide
     safe_name = (stream_name.strip() or "stream").replace(" ", "_")
     ts_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
     stream_subfolder = os.path.join(output_folder.strip(), f"{safe_name}_{ts_tag}")
 
     classes = [c.strip() for c in detection_classes.strip().splitlines() if c.strip()]
-    prompt = " . ".join(classes) if classes else None
+    cv_prompt = " . ".join(classes) if classes else None
+    warning_line = _parse_line_coords(warn_x1, warn_y1, warn_x2, warn_y2)
+    danger_line = _parse_line_coords(dang_x1, dang_y1, dang_x2, dang_y2)
 
-    has_roi = int(roi_w) > 0 and int(roi_h) > 0
-    gdino_rois = [[int(roi_x), int(roi_y), int(roi_w), int(roi_h)]] if has_roi else [[]]
+    cv_params = {
+        "gdinoprompt": cv_prompt,
+        "gdinothreshold": float(box_threshold),
+        "gdino_rois": [[]],
+        "fast_event_channel": fast_event_channel or "cv:fast_events",
+    }
+    if warning_line:
+        cv_params["warning_line"] = warning_line
+    if danger_line:
+        cv_params["danger_line"] = danger_line
 
     payload = {
         "version": "1.0",
@@ -546,11 +622,7 @@ def add_stream(pipeline_id, stream_url, sensor_id, stream_name, output_folder,
         "sensor_id": sensor_id.strip() if sensor_id.strip() else None,
         "stream_name": safe_name,
         "processing_state": "enabled",
-        "cv_params": {
-            "gdinoprompt": prompt,
-            "gdinothreshold": float(box_threshold),
-            "gdino_rois": gdino_rois,
-        },
+        "cv_params": cv_params,
     }
     try:
         r = _post("/api/addstream", payload)
@@ -561,17 +633,17 @@ def add_stream(pipeline_id, stream_url, sensor_id, stream_name, output_folder,
         sid = data["stream_id"]
         state = data.get("processing_state", "")
 
-        # Start auto-review watcher if enabled and prompt is provided
         watcher_note = ""
-        if auto_review and vlm_prompt.strip():
+        if auto_review and (warning_prompt.strip() or danger_prompt.strip()):
             start_watcher(
                 stream_id=sid,
                 output_folder=stream_subfolder,
                 sensor_id=sensor_id.strip() or "sensor-1",
                 stream_name=safe_name,
-                prompt=vlm_prompt.strip(),
+                warning_prompt=warning_prompt.strip(),
+                danger_prompt=danger_prompt.strip(),
                 system_prompt=vlm_system_prompt.strip(),
-                event_type=event_type.strip() or "event",
+                event_type=event_type.strip() or "line_crossing",
                 severity=severity,
                 chunk_duration=int(chunk_duration),
                 num_frames=int(num_frames),
@@ -580,8 +652,8 @@ def add_stream(pipeline_id, stream_url, sensor_id, stream_name, output_folder,
                 poll_sec=int(poll_sec),
             )
             watcher_note = f"\n🤖 Auto-Review: เปิดแล้ว (poll ทุก {int(poll_sec)} วิ)"
-        elif auto_review and not vlm_prompt.strip():
-            watcher_note = "\n⚠️ Auto-Review: ไม่ได้เปิด (กรุณาใส่ VLM Prompt)"
+        elif auto_review:
+            watcher_note = "\n⚠️ Auto-Review: ไม่ได้เปิด (กรุณาใส่ Warning หรือ Danger Prompt)"
 
         return (
             f"✅ เพิ่ม Stream สำเร็จ\n"
@@ -663,7 +735,6 @@ def stop_stream(stream_id):
             return "✅ หยุด Stream และ watcher สำเร็จ"
         return f"❌ {data.get('message', r.text)}"
     except requests.exceptions.ReadTimeout:
-        # Server is still terminating the DeepStream process — verify by checking stream list
         try:
             streams = _get("/api/streams").json().get("streams", [])
             still_exists = any(s["stream_id"] == sid for s in streams)
@@ -718,9 +789,7 @@ def health_check():
 # Manual VLM Review helpers (Tab 4)
 # ---------------------------------------------------------------------------
 
-
 def list_clips(output_folder: str):
-    """Scan base folder and all subfolders for info.txt, return all clips found."""
     if not output_folder.strip():
         return [], gr.update(choices=[]), "❌ กรุณาระบุ Output Folder"
     base = output_folder.strip()
@@ -743,7 +812,7 @@ def list_clips(output_folder: str):
                 continue
             display = os.path.join(rel_dir, c + ".mp4") if rel_dir != "." else c + ".mp4"
             rows.append([display, rel_dir if rel_dir != "." else "(root)"])
-            choices.append(full_mp4)   # store full path as value
+            choices.append(full_mp4)
             folder_count.add(dirpath)
 
     if not rows:
@@ -783,10 +852,8 @@ def submit_uploaded_clip(uploaded_file, sensor_id, stream_name,
     if not prompt.strip():
         return "❌ กรุณาใส่ VLM Prompt ก่อน"
 
-    tmp_path = uploaded_file if isinstance(uploaded_file, str) else uploaded_file.name
-
-    # Copy to shared folder (ALERT_REVIEW_MEDIA_BASE_DIR) so Machine 2 can access it
     import shutil
+    tmp_path = uploaded_file if isinstance(uploaded_file, str) else uploaded_file.name
     dest_dir = os.path.join(DEFAULT_OUTPUT_FOLDER, "manual_uploads")
     os.makedirs(dest_dir, exist_ok=True)
     ts_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -828,11 +895,11 @@ def submit_all_clips(output_folder, sensor_id, stream_name,
         for c in clips:
             full_mp4 = os.path.join(dirpath, c + ".mp4")
             if os.path.exists(full_mp4):
-                all_videos.append(full_mp4)
+                all_videos.append((c, full_mp4))
     if not all_videos:
         return f"❌ ไม่พบ clips ใน {base}"
     results = []
-    for video_path in all_videos:
+    for c, video_path in all_videos:
         payload = _build_event_payload(video_path, sensor_id, stream_name,
                                        prompt, system_prompt,
                                        event_type, severity,
@@ -855,14 +922,15 @@ CSS = """
 .status-box textarea { font-family: monospace; font-size: 0.85rem; }
 .stream-table { font-size: 0.85rem; }
 .hw-box textarea { font-family: monospace; font-size: 0.8rem; background: #1a1a2e; color: #00ff88; }
+.zone-warn { border-left: 4px solid #f5a623 !important; padding-left: 8px; }
+.zone-dang { border-left: 4px solid #e02020 !important; padding-left: 8px; }
 footer { display: none !important; }
 """
 
-with gr.Blocks(title="CV Event Detector UI") as demo:
+with gr.Blocks(title="CV Event Detector UI", css=CSS) as demo:
 
-    gr.Markdown("# CV Event Detector — Pipeline & Stream Manager")
+    gr.Markdown("# CV Event Detector — Line Crossing Safety Monitor")
 
-    # ── Service health + Hardware monitoring ──────────────────────────────────
     with gr.Row():
         health_txt = gr.Textbox(label="Service Status", interactive=False,
                                 value=health_check, every=30, scale=3)
@@ -875,7 +943,6 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
     btn_health.click(health_check, outputs=health_txt)
     btn_hw.click(get_hw_status, outputs=hw_txt)
 
-    # ═══════════════════════════════════════════════════════════════════════════
     with gr.Tabs():
 
         # ── TAB 1: Pipeline ───────────────────────────────────────────────────
@@ -933,7 +1000,10 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
 
         # ── TAB 2: เพิ่ม Streams ──────────────────────────────────────────────
         with gr.TabItem("📷 เพิ่ม Streams"):
-            gr.Markdown("เลือก Pipeline แล้วระบุ stream ทุกกล้องในตาราง — กดปุ่มเดียวเพิ่มทั้งหมด")
+            gr.Markdown(
+                "เลือก Pipeline แล้วกำหนดกล้องและโซนตรวจจับ — กดปุ่มเดียวเพิ่มทั้งหมด\n\n"
+                "พิกัดใช้ระบบ **0,0 = มุมซ้ายบน → 1920,1080 = มุมขวาล่าง**"
+            )
             with gr.Row():
                 s_pipeline = gr.Dropdown(
                     label="Pipeline",
@@ -943,7 +1013,7 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                 btn_s_refresh_pipe = gr.Button("🔄", scale=0, min_width=60)
 
             with gr.Row():
-                # ── left: streams table + CV ──────────────────────────────────
+                # ── left column ───────────────────────────────────────────────
                 with gr.Column(scale=1):
                     gr.Markdown("#### 📷 รายการ Streams")
                     s_streams_df = gr.Dataframe(
@@ -959,45 +1029,86 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                             ["", "cam-3", "sensor-3"],
                         ],
                     )
-                    gr.Markdown("#### 🔍 CV Detection (ใช้ร่วมกันทุก stream)")
+
+                    gr.Markdown("#### 🔍 CV Detection")
                     s_classes = gr.Textbox(
                         label="Detection Classes (หนึ่งคลาสต่อบรรทัด)",
-                        lines=3, placeholder="person\ncar\ntruck", value="person",
+                        lines=2, value="person",
                     )
-                    s_threshold = gr.Slider(label="Box Threshold", minimum=0.1, maximum=1.0, step=0.05, value=0.3)
-                    gr.Markdown("#### ROI — เว้นว่างถ้าใช้ทั้งภาพ")
-                    with gr.Row():
-                        s_roi_x = gr.Number(label="X", value=0, minimum=0, precision=0)
-                        s_roi_y = gr.Number(label="Y", value=0, minimum=0, precision=0)
-                        s_roi_w = gr.Number(label="W (0=ทั้งภาพ)", value=0, minimum=0, precision=0)
-                        s_roi_h = gr.Number(label="H (0=ทั้งภาพ)", value=0, minimum=0, precision=0)
+                    s_threshold = gr.Slider(
+                        label="Box Threshold", minimum=0.1, maximum=1.0, step=0.05, value=0.3)
 
-                # ── right: VLM / Auto-Review ──────────────────────────────────
+                    gr.Markdown("#### 🟡 Warning Zone — เส้นเตือน")
+                    with gr.Row(elem_classes="zone-warn"):
+                        s_warn_x1 = gr.Number(label="X1", value=0, precision=0)
+                        s_warn_y1 = gr.Number(label="Y1", value=400, precision=0)
+                        s_warn_x2 = gr.Number(label="X2", value=1920, precision=0)
+                        s_warn_y2 = gr.Number(label="Y2", value=400, precision=0)
+                    gr.Markdown(
+                        "<small>ตัวอย่าง: เส้นแนวนอนตรงกลาง → X1=0 Y1=540 X2=1920 Y2=540</small>")
+
+                    gr.Markdown("#### 🔴 Danger Zone — เส้นอันตราย")
+                    with gr.Row(elem_classes="zone-dang"):
+                        s_dang_x1 = gr.Number(label="X1", value=0, precision=0)
+                        s_dang_y1 = gr.Number(label="Y1", value=600, precision=0)
+                        s_dang_x2 = gr.Number(label="X2", value=1920, precision=0)
+                        s_dang_y2 = gr.Number(label="Y2", value=600, precision=0)
+                    gr.Markdown(
+                        "<small>วางเส้น Danger ใกล้เครื่องจักรมากกว่า Warning</small>")
+
+                # ── right column ──────────────────────────────────────────────
                 with gr.Column(scale=1):
-                    gr.Markdown("#### 🤖 Auto VLM Review (ใช้ร่วมกันทุก stream)")
+                    gr.Markdown("#### 🤖 Auto VLM Review")
                     s_auto_review = gr.Checkbox(
                         label="เปิด Auto-Review (ส่ง clip ให้ Alert-Bridge อัตโนมัติ)", value=True)
                     s_poll_sec = gr.Slider(
                         label="Poll Interval (วินาที)", minimum=3, maximum=60, step=1, value=5)
-                    s_vlm_prompt = gr.Textbox(
-                        label="VLM Prompt *", lines=5,
-                        placeholder="e.g. Does the video show signs of overcrowding?",
+
+                    gr.Markdown("#### 🟡 Warning Zone Prompt")
+                    s_warning_prompt = gr.Textbox(
+                        label="Prompt เมื่อข้ามเส้น Warning *",
+                        lines=4,
+                        placeholder="เช่น: คนกำลังเข้าใกล้พื้นที่อันตรายหรือเปล่า? ตอบ YES/NO",
+                        value="",
                     )
+
+                    gr.Markdown("#### 🔴 Danger Zone Prompt")
+                    s_danger_prompt = gr.Textbox(
+                        label="Prompt เมื่อข้ามเส้น Danger *",
+                        lines=4,
+                        placeholder="เช่น: คนอยู่ในรัศมีอันตรายของเครื่องจักรหรือเปล่า? ตอบ YES/NO พร้อมระดับความเร่งด่วน",
+                        value="",
+                    )
+
                     s_vlm_sys_prompt = gr.Textbox(
-                        label="System Prompt (ไม่บังคับ)", lines=2,
-                        placeholder="e.g. You are a warehouse safety monitoring system.",
+                        label="System Prompt (ใช้ร่วมกันทั้งสอง Zone — ไม่บังคับ)",
+                        lines=2,
+                        placeholder="เช่น: You are a factory safety monitoring AI.",
                     )
+
                     gr.Markdown("#### Event Info")
                     with gr.Row():
-                        s_event_type = gr.Textbox(label="Event Type", value="over_crowding", scale=2)
-                        s_severity   = gr.Dropdown(
-                            label="Severity", choices=["LOW", "MEDIUM", "HIGH", "CRITICAL"],
-                            value="MEDIUM", scale=1,
+                        s_event_type = gr.Textbox(
+                            label="Event Type (base)", value="line_crossing", scale=2)
+                        s_severity = gr.Dropdown(
+                            label="Severity",
+                            choices=["LOW", "MEDIUM", "HIGH", "CRITICAL"],
+                            value="HIGH", scale=1,
                         )
+
+                    gr.Markdown("#### ⚡ Fast Output (Redis)")
+                    s_fast_channel = gr.Textbox(
+                        label="Redis Channel",
+                        value="cv:fast_events",
+                        info="อุปกรณ์ที่ต้องการหยุดทันทีให้ subscribe channel นี้",
+                    )
+
                     gr.Markdown("#### VSS Params")
                     with gr.Row():
-                        s_chunk_dur   = gr.Number(label="Chunk Duration (วิ)", value=60, minimum=1, precision=0)
-                        s_num_frames  = gr.Number(label="Frames per Chunk", value=8, minimum=1, precision=0)
+                        s_chunk_dur  = gr.Number(
+                            label="Chunk Duration (วิ)", value=60, minimum=1, precision=0)
+                        s_num_frames = gr.Number(
+                            label="Frames per Chunk", value=8, minimum=1, precision=0)
                     with gr.Row():
                         s_reasoning       = gr.Checkbox(label="Enable Reasoning", value=False)
                         s_do_verification = gr.Checkbox(label="Do Verification", value=True)
@@ -1014,16 +1125,17 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                 inputs=[
                     s_pipeline, s_streams_df,
                     s_classes, s_threshold,
-                    s_roi_x, s_roi_y, s_roi_w, s_roi_h,
+                    s_warn_x1, s_warn_y1, s_warn_x2, s_warn_y2,
+                    s_dang_x1, s_dang_y1, s_dang_x2, s_dang_y2,
                     s_auto_review, s_poll_sec,
-                    s_vlm_prompt, s_vlm_sys_prompt,
+                    s_warning_prompt, s_danger_prompt, s_vlm_sys_prompt,
                     s_event_type, s_severity,
                     s_chunk_dur, s_num_frames, s_reasoning, s_do_verification,
+                    s_fast_channel,
                 ],
                 outputs=s_result,
             )
 
-            # sync pipeline dropdown from Tab 1
             _pipe_dd_state.change(
                 lambda v: gr.update(value=v) if v else gr.update(),
                 inputs=_pipe_dd_state,
@@ -1087,7 +1199,6 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                 f"`Alert-Bridge: {ALERTBRIDGE_URL}`"
             )
             with gr.Row():
-                # ── left: clip selection ──────────────────────────────────────
                 with gr.Column(scale=2):
                     with gr.Tab("📁 จาก Folder"):
                         gr.Markdown("สแกน folder และ subfolders ทั้งหมดที่มี `info.txt`")
@@ -1113,18 +1224,18 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
                         )
                         btn_t4_upload = gr.Button("📤 ส่ง Clip ที่ Upload", variant="primary")
 
-                # ── right: prompt & event settings ───────────────────────────
                 with gr.Column(scale=2):
                     gr.Markdown("#### VLM Prompt")
                     t4_prompt     = gr.Textbox(label="VLM Prompt *", lines=5)
                     t4_sys_prompt = gr.Textbox(label="System Prompt (ไม่บังคับ)", lines=2)
                     gr.Markdown("#### Event Info")
                     with gr.Row():
-                        t4_event_type = gr.Textbox(label="Event Type", value="over_crowding", scale=2)
+                        t4_event_type = gr.Textbox(
+                            label="Event Type", value="line_crossing", scale=2)
                         t4_severity   = gr.Dropdown(
                             label="Severity",
                             choices=["LOW", "MEDIUM", "HIGH", "CRITICAL"],
-                            value="MEDIUM", scale=1,
+                            value="HIGH", scale=1,
                         )
                     t4_sensor_id   = gr.Textbox(label="Sensor ID", value="sensor-1")
                     t4_stream_name = gr.Textbox(label="Stream Name", value="")
@@ -1138,7 +1249,6 @@ with gr.Blocks(title="CV Event Detector UI") as demo:
 
             t4_result = gr.Textbox(label="ผลลัพธ์", lines=8, elem_classes="status-box")
 
-            # shared inputs for prompt/event settings
             _t4_common = [t4_sensor_id, t4_stream_name,
                           t4_prompt, t4_sys_prompt,
                           t4_event_type, t4_severity,

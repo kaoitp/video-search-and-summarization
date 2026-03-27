@@ -357,6 +357,65 @@ def update_infer_config_threshold(config_file_path: str, threshold_value: float,
     print(f"Added/updated threshold={threshold_value} in [class-attrs-all] section of {config_file_path}")
     return config_file_path
 
+def generate_linecrossing_config(
+    warning_line: Optional[List[int]],
+    danger_line: Optional[List[int]],
+    stream_id: str,
+) -> str:
+    """
+    Generate a per-stream nvdsanalytics config file with line-crossing zones.
+
+    Each line [x1, y1, x2, y2] is expanded into a thin crossing band (4-point
+    quad) required by nvdsanalytics.  The generated file is written to /tmp so
+    it does not overwrite the default template.
+
+    Returns the path to the generated config file.
+    """
+    def _line_to_band(coords: List[int], offset: int = 8) -> str:
+        x1, y1, x2, y2 = coords
+        dx, dy = x2 - x1, y2 - y1
+        length = max(math.sqrt(dx * dx + dy * dy), 1.0)
+        # Perpendicular unit vector scaled by offset
+        nx = int(-dy / length * offset)
+        ny = int(dx / length * offset)
+        # Two parallel lines form the crossing band
+        return (
+            f"{x1+nx};{y1+ny};{x2+nx};{y2+ny};"
+            f"{x1-nx};{y1-ny};{x2-nx};{y2-ny}"
+        )
+
+    lines = [
+        "[property]",
+        "enable=1",
+        "config-width=1920",
+        "config-height=1080",
+        "osd-mode=2",
+        "display-font-size=12",
+        "",
+        "[line-crossing-stream-0]",
+        "enable=1",
+    ]
+
+    if warning_line and len(warning_line) == 4:
+        lines.append(f"line-crossing-Warning={_line_to_band(warning_line)}")
+    if danger_line and len(danger_line) == 4:
+        lines.append(f"line-crossing-Danger={_line_to_band(danger_line)}")
+
+    lines += [
+        "class-id=2",   # person only
+        "extended=0",
+        "mode=balanced",
+        "",
+    ]
+
+    config_path = f"/tmp/config_nvdsanalytics_{stream_id}.txt"
+    with open(config_path, "w") as f:
+        f.write("\n".join(lines))
+
+    print(f"Generated linecrossing config: {config_path}")
+    return config_path
+
+
 class ObjectCounterMarker(BatchMetadataOperator):
     def __init__(self, gdinoprompt:str):
         super().__init__()
@@ -422,7 +481,13 @@ class ObjectCounterMarker(BatchMetadataOperator):
             frame_meta.append(display_meta)
             '''
 
-def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshold:float, gdino_rois:List[List[int]], frame_skip_interval:int, object_detection_threshold=3,streamname:str=None, vss_server_url:str=None):
+def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshold:float, gdino_rois:List[List[int]], frame_skip_interval:int, object_detection_threshold=3, streamname:str=None, vss_server_url:str=None, warning_line:Optional[List[int]]=None, danger_line:Optional[List[int]]=None, stream_id:str=None, fast_event_channel:str="cv:fast_events"):
+
+    # Propagate stream identity and fast-event config to the gsteventgenerator
+    # plugin which runs inside this subprocess.
+    if stream_id:
+        os.environ['CV_STREAM_ID'] = stream_id
+    os.environ['CV_FAST_EVENT_CHANNEL'] = fast_event_channel or 'cv:fast_events'
 
     # update the config file with the new prompt if it exists else use
     # the default prompt
@@ -450,8 +515,16 @@ def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshol
     else:
         updated_inferconfig_file = CONFIG_FILE_PATH
 
-    # Update the nvdsanalytics config with object threshold
-    update_nvdsanalytics_config(CONFIG_NVDSANALYTICS_FILE_PATH, object_detection_threshold, gdino_rois)
+    # Determine which nvdsanalytics config to use:
+    # - If zone lines are provided, generate a per-stream line-crossing config.
+    # - Otherwise fall back to the default overcrowding template.
+    if warning_line or danger_line:
+        analytics_config_path = generate_linecrossing_config(
+            warning_line, danger_line, stream_id or 'default'
+        )
+    else:
+        update_nvdsanalytics_config(CONFIG_NVDSANALYTICS_FILE_PATH, object_detection_threshold, gdino_rois)
+        analytics_config_path = CONFIG_NVDSANALYTICS_FILE_PATH
     print(f"#######Using object-threshold: {object_detection_threshold} in {CONFIG_NVDSANALYTICS_FILE_PATH}")
     print(f"#######Using roi-OC: {gdino_rois} in {CONFIG_NVDSANALYTICS_FILE_PATH}")
 
@@ -498,7 +571,7 @@ def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshol
     pipeline.add("nvvideoconvert", "convert", {"compute-hw": 1})
     pipeline.add("nvvideoconvert", "convert2", {"compute-hw": 1})
     pipeline.add("nvvideoconvert", "convert3", {"compute-hw": 1})
-    pipeline.add("nvdsanalytics", "nvdsanalytics",{"config-file": CONFIG_NVDSANALYTICS_FILE_PATH})
+    pipeline.add("nvdsanalytics", "nvdsanalytics",{"config-file": analytics_config_path})
     if DISABLE_SOM_OVERLAY:
         pipeline.add("queue", "nvdsosd")
     else:
@@ -567,6 +640,11 @@ class CVParams(BaseModel):
     gdinothreshold: Optional[float] = 0.3
     gdino_rois: Optional[List[List[int]]] = None
     overlay: Optional[bool] = True
+    # Line-crossing zone coordinates [x1, y1, x2, y2] in 1920×1080 space
+    warning_line: Optional[List[int]] = None
+    danger_line: Optional[List[int]] = None
+    # Redis channel for fast machine-stop events (default: cv:fast_events)
+    fast_event_channel: Optional[str] = "cv:fast_events"
 
 # Define the request model
 class AddStreamRequest(BaseModel):
@@ -802,6 +880,11 @@ async def add_stream(request: AddStreamRequest, response: Response):
         gdino_rois = request.cv_params.gdino_rois if request.cv_params else None
         print(f"#########gdino_rois: {gdino_rois[0]}")
         print(f"#########gdino_rois length : {len(gdino_rois)}")
+        warning_line = request.cv_params.warning_line if request.cv_params else None
+        danger_line = request.cv_params.danger_line if request.cv_params else None
+        fast_event_channel = (request.cv_params.fast_event_channel if request.cv_params else None) or "cv:fast_events"
+        print(f"#########warning_line: {warning_line}")
+        print(f"#########danger_line: {danger_line}")
 
         asset_id = str(uuid.uuid4())
         global asset_map
@@ -827,7 +910,11 @@ async def add_stream(request: AddStreamRequest, response: Response):
                                                                         pipeline_config.params.frame_skip_interval,
                                                                         pipeline_config.params.minimum_detection_threshold,
                                                                         request.stream_name+"_"+str(stream_info.timestamp),
-                                                                        pipeline_config.endpoint_url))
+                                                                        pipeline_config.endpoint_url,
+                                                                        warning_line,
+                                                                        danger_line,
+                                                                        asset_id,
+                                                                        fast_event_channel))
         stream_info.processing_state = "enabled"
         stream_info.process = process
         asset_map[asset_id] = stream_info
