@@ -30,6 +30,11 @@ services:
       SKU_COOLDOWN: "${SKU_COOLDOWN:-2.0}"
       SKU_STREAM_NAME: "${SKU_STREAM_NAME:-conveyor}"
 
+      # --- Display output window ---
+      # ต้อง mount X11 socket และตั้ง DISPLAY ด้วย (ดูหัวข้อ volumes ด้านล่าง)
+      ENABLE_DISPLAY: "${ENABLE_DISPLAY:-false}"
+      DISPLAY: "${DISPLAY:-:0}"
+
       # --- Model selection ---
       USE_GDINO: "${USE_GDINO:-true}"
       USE_CUSTOM_MODEL: "${USE_CUSTOM_MODEL:-false}"
@@ -49,6 +54,10 @@ services:
 
       # ---- (Optional) mount local video file สำหรับทดสอบ ----
       # - "./test_videos:/input:ro"
+
+      # ---- Display output (uncomment ทั้งสองบรรทัดถ้าต้องการ window บน host) ----
+      # - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # - /dev/dri:/dev/dri
 
       # ---- (Optional) custom model files ----
       # วางไฟล์ model.onnx และ labels.txt ใน ./custom_model/ แล้ว uncomment บรรทัดนี้

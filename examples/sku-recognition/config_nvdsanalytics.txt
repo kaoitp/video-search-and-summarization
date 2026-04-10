@@ -1,49 +1,25 @@
-################################################################################
-# nvdsanalytics config for SKU Recognition - Line Crossing Detection
-#
-# ใช้สำหรับตรวจจับชิ้นงานที่ผ่านเส้นบนสายพาน
-# ปรับ line-crossing-SKU_LINE เพื่อกำหนดตำแหน่งเส้นให้ตรงกับสายพาน
-################################################################################
-
 [property]
 enable=1
-# ขนาดของวิดีโอ (ต้องตรงกับ STREAM_WIDTH/HEIGHT ใน sku_pipeline.py)
-config-width=1920
-config-height=1080
-# osd-mode 0: ไม่แสดงเส้น/ROI บนจอ
-#           1: แสดงเส้นและ label
-#           2: แสดงทั้งหมดรวมถึงตัวเลข count
+config-width=3840
+config-height=2160
 osd-mode=2
 display-font-size=12
 
-## Per stream configuration
 [roi-filtering-stream-0]
 enable=0
 roi-RF=0;0;1919;0;1919;1079;0;1079
 inverse-roi=0
 class-id=-1
 
-## Overcrowding detection - ปิดไว้ใช้ line crossing แทน
 [overcrowding-stream-0]
 enable=0
 roi-OC=0;0;1919;0;1919;1079;0;1079
 object-threshold=1
 class-id=-1
 
-## Line Crossing Detection สำหรับสายพาน
-## ชื่อ "SKU_LINE" ต้องตรงกับ line-name property ใน gstskucapture
-## รูปแบบพิกัด: x1;y1;x2;y2 (จุดเริ่มต้น;จุดสิ้นสุดของเส้น)
-##
-## ตัวอย่างด้านล่าง: เส้นแนวตั้งที่กึ่งกลางจอ (x=960)
-##   จุดบน: (960, 50) → จุดล่าง: (960, 1030)
-## ปรับพิกัดให้ตรงกับตำแหน่งสายพานจริง
 [line-crossing-stream-0]
 enable=1
-# ชื่อเส้น: line-crossing-<NAME>=x1;y1;x2;y2
-line-crossing-SKU_LINE=960;50;960;1030
+line-crossing-SKU_LINE=1800;200;1800;1500
 class-id=-1
-# extended=0: นับเฉพาะตรงเส้นที่กำหนด
-# extended=1: สมมุติว่าเส้นยาวถึงขอบจอ
 extended=0
-# mode: loose / balanced / strict (ความเข้มงวดของทิศทางการข้าม)
 mode=balanced

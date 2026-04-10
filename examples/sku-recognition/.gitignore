@@ -1,0 +1,20 @@
+# Captured output images
+captures/
+
+# Environment variables (contains secrets/config)
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Test videos / sample inputs
+sample/
+
+# TensorRT engine cache (generated, large)
+*.engine
+*.plan
+
+# Logs
+*.log
