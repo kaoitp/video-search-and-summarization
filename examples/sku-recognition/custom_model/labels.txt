@@ -1,0 +1,8 @@
+# ใส่ชื่อ class ของ custom model ที่นี่ (1 class ต่อบรรทัด)
+# ลำดับต้องตรงกับ class index ของ model ที่ train มา
+# ตัวอย่างสำหรับ SKU บนสายพาน:
+bottle
+can
+box
+bag
+carton

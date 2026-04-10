@@ -1,0 +1,79 @@
+services:
+
+  sku-recognition:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sku-recognition:latest
+
+    runtime: nvidia
+    ipc: host
+
+    shm_size: '8gb'
+
+    environment:
+      # --- Video source (required) ---
+      # รองรับ RTSP URL หรือ path ใน container
+      # ถ้าเป็น local file ให้ mount ผ่าน volumes แล้วใส่ path ใน container
+      SKU_SOURCE: "${SKU_SOURCE:-rtsp://192.168.1.100:554/stream}"
+
+      # --- Output folder ใน container (mount ออกมาที่ host ผ่าน volumes) ---
+      SKU_OUTPUT_DIR: /output/captures
+
+      # --- Detection prompt สำหรับ GroundingDINO ---
+      SKU_PROMPT: "${SKU_PROMPT:-product . box . bottle . can . package}"
+      SKU_THRESHOLD: "${SKU_THRESHOLD:-0.3}"
+
+      # --- Line crossing settings ---
+      # SKU_LINE_NAME ต้องตรงกับชื่อในไฟล์ config_nvdsanalytics.txt
+      SKU_LINE_NAME: "${SKU_LINE_NAME:-SKU_LINE}"
+      SKU_COOLDOWN: "${SKU_COOLDOWN:-2.0}"
+      SKU_STREAM_NAME: "${SKU_STREAM_NAME:-conveyor}"
+
+      # --- Model selection ---
+      USE_GDINO: "${USE_GDINO:-true}"
+      USE_CUSTOM_MODEL: "${USE_CUSTOM_MODEL:-false}"
+      SKU_CUSTOM_MODEL_CONFIG: "${SKU_CUSTOM_MODEL_CONFIG:-/opt/nvidia/sku-recognition/custom_model/nvinfer_config.yaml}"
+      DISABLE_SOM_OVERLAY: "${DISABLE_SOM_OVERLAY:-false}"
+      INSTALL_PROPRIETARY_CODECS: "true"
+      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-all}"
+      LD_LIBRARY_PATH: "/opt/nvidia/deepstream/deepstream/lib:/opt/tritonserver/lib/"
+
+    volumes:
+      # ---- Model cache (เก็บ model ไว้ไม่ต้อง download ซ้ำ) ----
+      - sku-ngc-model-cache:/root/.via/ngc_model_cache
+      - sku-hf-cache:/tmp/huggingface
+
+      # ---- Output folder → host ----
+      - "${SKU_HOST_OUTPUT_DIR:-./captures}:/output/captures"
+
+      # ---- (Optional) mount local video file สำหรับทดสอบ ----
+      # - "./test_videos:/input:ro"
+
+      # ---- (Optional) custom model files ----
+      # วางไฟล์ model.onnx และ labels.txt ใน ./custom_model/ แล้ว uncomment บรรทัดนี้
+      # - "./custom_model:/opt/nvidia/sku-recognition/custom_model"
+
+      # ---- (Optional) override nvdsanalytics config ----
+      # - "./config_nvdsanalytics.txt:/opt/nvidia/sku-recognition/config_nvdsanalytics.txt"
+
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65535
+        hard: 65535
+      stack: 67108864
+
+    # ---- Network (ถ้าต้องการใช้ร่วมกับ VSS stack) ----
+    # networks:
+    #   - vss-shared-network
+
+volumes:
+  sku-ngc-model-cache:
+  sku-hf-cache:
+
+# networks:
+#   vss-shared-network:
+#     external: true

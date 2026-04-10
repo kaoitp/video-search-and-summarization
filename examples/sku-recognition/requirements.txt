@@ -1,0 +1,30 @@
+# SKU Recognition - Dependencies
+# ================================
+# หมายเหตุ: pyservicemaker และ pyds ติดตั้งมาพร้อมกับ NVIDIA DeepStream SDK
+# ไม่ต้อง pip install แยก — ต้องรันใน DeepStream container หรือ environment ที่ติดตั้ง DS แล้ว
+#
+# ติดตั้ง dependencies เพิ่มเติม:
+#   pip install -r requirements.txt
+
+# ---- Computer Vision ----
+opencv-python>=4.8.0
+
+# ---- Deep Learning (ต้องตรงกับ CUDA version ใน container) ----
+# หากอยู่ใน DeepStream container torch มักติดตั้งมาแล้ว
+# ถ้าต้องติดตั้งเอง ดู https://pytorch.org/get-started/locally/
+torch>=2.0.0
+
+# ---- Numerics ----
+numpy>=1.24.0
+
+# ---- GStreamer Python bindings ----
+# PyGObject ติดตั้งผ่าน apt ใน container:
+#   apt-get install python3-gi python3-gi-cairo gir1.2-gst-plugins-base-1.0
+# หรือ pip:
+PyGObject>=3.42.0
+
+# ---- (Optional) สำหรับส่ง captured image ไปยัง VLM ในขั้นต่อไป ----
+# anthropic>=0.25.0       # Claude VLM
+# openai>=1.30.0          # OpenAI GPT-4V
+# httpx>=0.27.0           # async HTTP client
+# Pillow>=10.0.0          # image conversion helper

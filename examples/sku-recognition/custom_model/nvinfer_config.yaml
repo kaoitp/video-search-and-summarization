@@ -1,0 +1,48 @@
+# nvinfer config สำหรับ custom ONNX/TensorRT model
+# =====================================================
+# ใช้กับ pipeline เมื่อตั้ง USE_GDINO=false และ USE_CUSTOM_MODEL=true
+#
+# รองรับ:
+#   - YOLOv8 / YOLOv5 export เป็น ONNX
+#   - NVIDIA TAO model
+#   - Custom ONNX จาก PyTorch/TensorFlow
+#
+# วิธี export YOLOv8 เป็น ONNX:
+#   yolo export model=best.pt format=onnx imgsz=640 simplify=True
+
+class-attrs-all:
+  pre-cluster-threshold: 0.25   # confidence threshold (ปรับได้ผ่าน SKU_THRESHOLD)
+
+property:
+  # ---- Model files ----
+  # วางไฟล์ model ไว้ใน custom_model/ แล้ว mount เข้า container
+  onnx-file: /opt/nvidia/sku-recognition/custom_model/model.onnx
+  # TRT engine จะสร้างอัตโนมัติครั้งแรก (ใช้เวลา ~5-10 นาที)
+  model-engine-file: /opt/nvidia/sku-recognition/custom_model/model.onnx_b1_gpu0_fp16.engine
+  labelfile-path: /opt/nvidia/sku-recognition/custom_model/labels.txt
+
+  # ---- Model architecture ----
+  gie-unique-id: 1
+  network-type: 0             # 0=detector, 1=classifier, 2=segmentation
+  num-detected-classes: 5     # จำนวน class ต้องตรงกับ labels.txt
+
+  # ---- Input format ----
+  # YOLOv8 default: 640x640, RGB
+  infer-dims: 3;640;640       # C;H;W
+  network-mode: 2             # 0=FP32, 1=INT8, 2=FP16
+  model-color-format: 0       # 0=RGB, 1=BGR, 2=GRAY
+  maintain-aspect-ratio: 1
+  symmetric-padding: 1
+  net-scale-factor: 0.00392156863   # 1/255 สำหรับ normalized input
+
+  # ---- Output parser ----
+  # YOLOv8: ใช้ NvDsInferParseCustomYoloV8 หรือ NvDsInferParseCustomYolo
+  # TAO:    ใช้ NvDsInferParseCustomDDETRTAO
+  # ถ้าไม่มี custom parser ใช้ default NMS
+  cluster-mode: 4             # 4=NMS
+
+  # custom-lib-path: /opt/nvidia/sku-recognition/custom_model/libnvds_custombboxparser.so
+  # parse-bbox-func-name: NvDsInferParseCustomYoloV8
+
+  # ---- Performance ----
+  workspace-size: 2048576
