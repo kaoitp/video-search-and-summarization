@@ -1,0 +1,14 @@
+api:
+  listen: :1984
+
+rtsp:
+  listen: :8554
+
+streams:
+  # เพิ่ม camera ที่นี่ในรูปแบบ:
+  # <ชื่อ>:
+  #   - ffmpeg:<rtsp_url>#video=h264&audio=disable
+  #
+  # ตัวอย่าง:
+  # cam_test:
+  #   - ffmpeg:rtsp://admin:password@192.168.1.100/Streaming/Channels/101/#video=h264&audio=disable
