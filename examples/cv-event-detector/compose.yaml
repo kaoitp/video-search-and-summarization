@@ -68,6 +68,9 @@ services:
     volumes:
       - "${ALERT_REVIEW_MEDIA_BASE_DIR:-/dummy}${ALERT_REVIEW_MEDIA_BASE_DIR:+:${ALERT_REVIEW_MEDIA_BASE_DIR:-}}"
       - cv-input-dir:/tmp
+      - type: bind
+        source: ./stream-test
+        target: /stream-test
     environment:
       - BACKEND_IP=via-server
       - BACKEND_PORT=${VSS_BACKEND_PORT:-8000}
@@ -76,6 +79,7 @@ services:
       - NV_ENABLE_VST=${NV_ENABLE_VST:-true}
       - NV_ENABLE_ALERTBRIDGE=${NV_ENABLE_ALERTBRIDGE:-true}
       - NV_ALERTBRIDGE_API_BASE=http://api-gateway:80/api/alertbridge
+      - ALERT_REVIEW_MEDIA_BASE_DIR=${ALERT_REVIEW_MEDIA_BASE_DIR?}
       - FILTERED_CLIP_PATH=${ALERT_REVIEW_MEDIA_BASE_DIR?}
       - NV_SERIALIZE_ALERT_VERIFICATION=${NV_SERIALIZE_ALERT_VERIFICATION:-false}
       - VLM_MODEL=${VLM_MODEL:-cosmos-reason2}

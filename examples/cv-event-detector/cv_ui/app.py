@@ -1,12 +1,14 @@
 ######################################################################################################
 # CV Event Detector UI — FastAPI backend (replaces Gradio)
 ######################################################################################################
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, File, UploadFile
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+import asyncio
 import httpx
 import json
 import os
+import shutil
 import subprocess
 import threading
 import uuid
@@ -17,7 +19,11 @@ app = FastAPI()
 
 CV_API_URL = os.environ.get("NV_CV_EVENT_DETECTOR_API_URL", "http://nv-cv-event-detector:23491")
 ALERTBRIDGE_URL = os.environ.get("NV_ALERTBRIDGE_URL", "http://alert-bridge:9080")
-DEFAULT_OUTPUT_FOLDER = os.environ.get("ALERT_REVIEW_MEDIA_BASE_DIR", "/tmp/cv-output")
+DEFAULT_OUTPUT_FOLDER = (
+    os.environ.get("ALERT_REVIEW_MEDIA_BASE_DIR")
+    or os.environ.get("FILTERED_CLIP_PATH")
+    or "/tmp/cv-output"
+)
 
 _watchers: dict = {}
 _lock = threading.Lock()
@@ -137,6 +143,71 @@ async def capture_frame(request: Request):
             os.unlink(tmp_path)
         except Exception:
             pass
+
+
+# ── Live MJPEG stream ─────────────────────────────────────────────────────────
+
+@app.get("/api/stream-live")
+async def stream_live(url: str = ""):
+    if not url:
+        raise HTTPException(400, "url required")
+
+    async def generate():
+        cmd = ["ffmpeg", "-y"]
+        if url.startswith("rtsp://"):
+            cmd += ["-rtsp_transport", "tcp"]
+        cmd += [
+            "-i", url,
+            "-vf", "scale=854:-2",
+            "-f", "image2pipe",
+            "-vcodec", "mjpeg",
+            "-q:v", "5",
+            "-r", "10",
+            "pipe:1",
+        ]
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            buf = b""
+            while True:
+                chunk = await proc.stdout.read(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                while True:
+                    soi = buf.find(b"\xff\xd8")
+                    if soi == -1:
+                        buf = b""
+                        break
+                    eoi = buf.find(b"\xff\xd9", soi + 2)
+                    if eoi == -1:
+                        buf = buf[soi:]
+                        break
+                    jpg = buf[soi:eoi + 2]
+                    buf = buf[eoi + 2:]
+                    yield (
+                        b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                        + jpg + b"\r\n"
+                    )
+        except Exception:
+            pass
+        finally:
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── Static SPA ────────────────────────────────────────────────────────────────
@@ -306,22 +377,53 @@ async def list_clips(folder: str = ""):
     if not os.path.isdir(base):
         return {"clips": [], "error": f"ไม่พบ folder: {base}"}
     clips = []
+    seen: set = set()
     for dirpath, _, filenames in os.walk(base):
-        if "info.txt" not in filenames:
-            continue
-        try:
-            with open(os.path.join(dirpath, "info.txt")) as f:
-                for clip in [l.strip() for l in f if l.strip()]:
-                    mp4 = os.path.join(dirpath, clip + ".mp4")
-                    if os.path.exists(mp4):
-                        clips.append({
-                            "path": mp4,
-                            "name": clip + ".mp4",
-                            "folder": os.path.relpath(dirpath, base),
-                        })
-        except Exception:
-            pass
+        # Prefer info.txt ordering when available
+        if "info.txt" in filenames:
+            try:
+                with open(os.path.join(dirpath, "info.txt")) as f:
+                    for clip in [l.strip() for l in f if l.strip()]:
+                        mp4 = os.path.join(dirpath, clip + ".mp4")
+                        if os.path.exists(mp4) and mp4 not in seen:
+                            seen.add(mp4)
+                            clips.append({
+                                "path": mp4,
+                                "name": clip + ".mp4",
+                                "folder": os.path.relpath(dirpath, base),
+                            })
+            except Exception:
+                pass
+        # Also pick up any .mp4 not referenced by info.txt
+        for fn in filenames:
+            if fn.lower().endswith(".mp4"):
+                mp4 = os.path.join(dirpath, fn)
+                if mp4 not in seen:
+                    seen.add(mp4)
+                    clips.append({
+                        "path": mp4,
+                        "name": fn,
+                        "folder": os.path.relpath(dirpath, base),
+                    })
     return {"clips": clips}
+
+
+@app.post("/api/clips/upload")
+async def upload_clip(file: UploadFile = File(...)):
+    upload_dir = os.path.join(DEFAULT_OUTPUT_FOLDER, "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    safe_name = os.path.basename(file.filename or "clip.mp4")
+    if not safe_name.lower().endswith(".mp4"):
+        raise HTTPException(400, "รองรับเฉพาะไฟล์ .mp4")
+    dest = os.path.join(upload_dir, safe_name)
+    base_path, ext = os.path.splitext(dest)
+    counter = 0
+    while os.path.exists(dest):
+        counter += 1
+        dest = f"{base_path}_{counter}{ext}"
+    with open(dest, "wb") as out:
+        shutil.copyfileobj(file.file, out)
+    return {"path": dest, "name": os.path.basename(dest)}
 
 
 @app.post("/api/clips/submit")

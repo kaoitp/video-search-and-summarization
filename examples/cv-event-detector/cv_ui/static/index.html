@@ -305,7 +305,7 @@ code { font-family: var(--mono); font-size: 0.8rem; }
   <div class="g2">
     <div>
       <div class="card">
-        <div class="card-title">📁 Clips</div>
+        <div class="card-title">📁 Clips จาก Server</div>
         <div class="frow" style="margin-bottom:10px">
           <input type="text" id="r-folder" placeholder="/tmp/cv-output" style="flex:1">
           <button class="btn btn-secondary btn-sm" onclick="scanClips()">🔍 สแกน</button>
@@ -322,6 +322,18 @@ code { font-family: var(--mono); font-size: 0.8rem; }
         <div class="row mt">
           <button class="btn btn-primary btn-sm" onclick="submitSelectedClip()">📤 ส่ง Clip ที่เลือก</button>
           <button class="btn btn-secondary btn-sm" onclick="submitAllClips()">📤 ส่งทุก Clip</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">⬆️ Upload Clip จากเครื่อง</div>
+        <div class="field">
+          <label>เลือกไฟล์ .mp4</label>
+          <input type="file" id="r-upload-file" accept=".mp4,video/mp4"
+                 style="background:var(--surface);border:1px dashed var(--border);border-radius:4px;padding:8px;color:var(--text);width:100%;cursor:pointer">
+        </div>
+        <div class="row mt">
+          <button class="btn btn-primary btn-sm" onclick="uploadClip()" id="btn-upload">⬆️ Upload</button>
+          <span id="r-upload-msg" class="muted"></span>
         </div>
       </div>
     </div>
@@ -352,6 +364,26 @@ code { font-family: var(--mono); font-size: 0.8rem; }
     </div>
   </div>
   <div class="log mt" id="r-log"></div>
+</div>
+
+<!-- LIVE VIEW MODAL -->
+<div id="live-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.87);z-index:9999;align-items:center;justify-content:center;padding:20px;">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;width:min(900px,92vw);display:flex;flex-direction:column;gap:12px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
+      <span style="font-weight:600;font-size:0.95rem;">📹 Live View — <span id="live-title" style="color:var(--accent)"></span></span>
+      <button class="btn btn-secondary btn-sm" onclick="closeLiveModal()">✕ ปิด</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <input type="text" id="live-url-input" placeholder="rtsp://… หรือ http://…" style="flex:1;font-size:0.82rem;font-family:var(--mono)">
+      <button class="btn btn-primary btn-sm" onclick="startLiveStream()">▶️ เล่น</button>
+    </div>
+    <div id="live-container" style="background:#000;border-radius:4px;min-height:120px;display:flex;align-items:center;justify-content:center;overflow:hidden;">
+      <div id="live-placeholder" class="muted" style="padding:24px;font-size:0.85rem;">กด ▶️ เล่น เพื่อดู live stream</div>
+      <img id="live-img" src="" alt="live stream" style="max-width:100%;max-height:65vh;display:none;border-radius:4px;">
+    </div>
+    <div id="live-error" style="display:none;font-size:0.82rem;color:var(--red);"></div>
+    <div class="muted" style="font-size:0.73rem;">หมายเหตุ: live view ใช้ RTSP ต้นทาง (ไม่มี OSD) · 10 fps · ปิด modal เพื่อหยุด stream</div>
+  </div>
 </div>
 
 <!-- ZONE MODAL -->
@@ -537,6 +569,12 @@ async function submitAddStreams() {
     }
   };
 
+  // Save stream URLs for live view lookup
+  streams.forEach(s => {
+    const safe = (s.name || 'stream').replace(/ /g, '_');
+    if (s.url) saveStreamUrl(safe, s.url);
+  });
+
   const btn = document.getElementById('btn-add');
   const log = document.getElementById('add-log');
   btn.disabled = true;
@@ -583,9 +621,10 @@ async function loadStreamsTable() {
       const pname = getPName(s.pipeline_id);
       const sc = {running:'b-green',completed:'b-blue',terminated:'b-red'}[s.processing_state] || 'b-yellow';
       const hasW = wids.has(s.stream_id);
+      const sName = s.stream_name || '';
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td>${s.stream_name||'—'}</td>
+        <td>${sName||'—'}</td>
         <td><code title="${s.stream_id}">${s.stream_id.slice(0,12)}…</code></td>
         <td>${pname||s.pipeline_id.slice(0,8)+'…'}</td>
         <td><span class="badge ${sc}">${s.processing_state}</span></td>
@@ -593,6 +632,7 @@ async function loadStreamsTable() {
         <td>${hasW?'🤖':''}</td>
         <td style="white-space:nowrap;display:flex;gap:4px">
           <button class="btn btn-danger btn-sm" onclick="stopStream('${s.stream_id}')">⏹️</button>
+          <button class="btn btn-secondary btn-sm" title="Live View" onclick="openLiveView('${sName}')">📹</button>
           <button class="btn btn-secondary btn-sm" onclick="viewStatus('${s.stream_id}')">🔍</button>
           ${hasW?`<button class="btn btn-secondary btn-sm" onclick="viewLog('${s.stream_id}')">📜</button>`:''}
         </td>`;
@@ -636,7 +676,10 @@ async function scanClips() {
   document.getElementById('r-scan-msg').textContent = '⏳ กำลังสแกน…';
   try {
     const d = await api('GET', '/api/clips' + (folder ? `?folder=${encodeURIComponent(folder)}` : ''));
-    if (d.error) { document.getElementById('r-scan-msg').textContent = '❌ ' + d.error; return; }
+    if (d.error) {
+      document.getElementById('r-scan-msg').textContent = `❌ ${d.error} — กรุณาตรวจสอบ ALERT_REVIEW_MEDIA_BASE_DIR`;
+      return;
+    }
     _clips = d.clips || [];
     const tbody = document.getElementById('r-tbody');
     const sel = document.getElementById('r-clip');
@@ -652,8 +695,46 @@ async function scanClips() {
       opt.value = c.path; opt.textContent = c.folder + '/' + c.name;
       sel.appendChild(opt);
     });
-    document.getElementById('r-scan-msg').textContent = `พบ ${_clips.length} clips`;
+    document.getElementById('r-scan-msg').textContent =
+      _clips.length ? `พบ ${_clips.length} clips` : '⚠️ ไม่พบคลิปใน folder นี้';
   } catch(e) { document.getElementById('r-scan-msg').textContent = '❌ ' + e.message; }
+}
+
+function _addClipToList(path, name, folder) {
+  const tbody = document.getElementById('r-tbody');
+  const sel   = document.getElementById('r-clip');
+  const c = { path, name, folder: folder || 'uploads' };
+  _clips.push(c);
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td>${c.name}</td><td class="muted">${c.folder}</td>`;
+  tr.style.cursor = 'pointer';
+  tr.onclick = () => { sel.value = c.path; };
+  tbody.appendChild(tr);
+  const opt = document.createElement('option');
+  opt.value = c.path; opt.textContent = c.folder + '/' + c.name;
+  sel.appendChild(opt);
+  sel.value = c.path;
+}
+
+async function uploadClip() {
+  const fileInput = document.getElementById('r-upload-file');
+  const msg = document.getElementById('r-upload-msg');
+  const btn = document.getElementById('btn-upload');
+  if (!fileInput.files?.length) { msg.textContent = '❌ กรุณาเลือกไฟล์ก่อน'; return; }
+  const file = fileInput.files[0];
+  msg.textContent = `⏳ กำลัง upload ${file.name}…`;
+  btn.disabled = true;
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    const resp = await fetch('/api/clips/upload', { method: 'POST', body: form });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    _addClipToList(data.path, data.name, 'uploads');
+    msg.textContent = `✅ ${data.name} — พร้อมส่ง`;
+    fileInput.value = '';
+  } catch(e) { msg.textContent = '❌ ' + e.message; }
+  finally { btn.disabled = false; }
 }
 
 function reviewPayload(path) {
@@ -723,6 +804,48 @@ async function refreshHardware() {
       `GPU${g.idx}[${g.name}] ${g.mu}/${g.mt}MB(${g.pct}%) util:${g.util}% ${g.temp}°C`
     ).join('  |  ');
   } catch {}
+}
+
+// ─── Stream URL storage (localStorage) ───────────────────────────────────────
+const _sUrls = () => JSON.parse(localStorage.getItem('cvStreamUrls') || '{}');
+function saveStreamUrl(name, url) {
+  const m = _sUrls(); m[name] = url; localStorage.setItem('cvStreamUrls', JSON.stringify(m));
+}
+function getStreamUrl(name) { return _sUrls()[name] || ''; }
+
+// ─── Live View Modal ──────────────────────────────────────────────────────────
+function openLiveView(streamName) {
+  document.getElementById('live-title').textContent = streamName;
+  document.getElementById('live-url-input').value = getStreamUrl(streamName);
+  const img = document.getElementById('live-img');
+  img.src = '';
+  img.style.display = 'none';
+  document.getElementById('live-placeholder').style.display = '';
+  document.getElementById('live-error').style.display = 'none';
+  document.getElementById('live-modal').style.display = 'flex';
+}
+
+function startLiveStream() {
+  const url = document.getElementById('live-url-input').value.trim();
+  const err = document.getElementById('live-error');
+  err.style.display = 'none';
+  if (!url) { err.textContent = '❌ กรุณาใส่ URL'; err.style.display = ''; return; }
+  const img = document.getElementById('live-img');
+  const ph = document.getElementById('live-placeholder');
+  ph.style.display = 'none';
+  img.style.display = 'block';
+  img.src = `/api/stream-live?url=${encodeURIComponent(url)}`;
+  img.onerror = () => {
+    err.textContent = '❌ ไม่สามารถเชื่อมต่อได้ — ตรวจสอบ URL และ network';
+    err.style.display = '';
+    img.style.display = 'none';
+    ph.style.display = '';
+  };
+}
+
+function closeLiveModal() {
+  document.getElementById('live-img').src = '';
+  document.getElementById('live-modal').style.display = 'none';
 }
 
 // ─── Zone Preview ─────────────────────────────────────────────────────────────
