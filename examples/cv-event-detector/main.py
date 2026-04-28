@@ -32,6 +32,7 @@ import re
 import signal
 import contextlib
 import sysconfig
+import shutil
 import numpy as np
 np.random.seed(1000)
 
@@ -450,10 +451,12 @@ def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshol
     else:
         updated_inferconfig_file = CONFIG_FILE_PATH
 
-    # Update the nvdsanalytics config with object threshold
-    update_nvdsanalytics_config(CONFIG_NVDSANALYTICS_FILE_PATH, object_detection_threshold, gdino_rois)
-    print(f"#######Using object-threshold: {object_detection_threshold} in {CONFIG_NVDSANALYTICS_FILE_PATH}")
-    print(f"#######Using roi-OC: {gdino_rois} in {CONFIG_NVDSANALYTICS_FILE_PATH}")
+    # Create per-stream analytics config so multiple cameras don't overwrite each other's zone
+    stream_analytics_config = f"/tmp/config_nvdsanalytics_{uuid.uuid4().hex[:8]}.txt"
+    shutil.copy(CONFIG_NVDSANALYTICS_FILE_PATH, stream_analytics_config)
+    update_nvdsanalytics_config(stream_analytics_config, object_detection_threshold, gdino_rois)
+    print(f"#######Using object-threshold: {object_detection_threshold} in {stream_analytics_config}")
+    print(f"#######Using roi-OC: {gdino_rois} in {stream_analytics_config}")
 
     # Update the inference config with threshold value
     try:
@@ -498,7 +501,7 @@ def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshol
     pipeline.add("nvvideoconvert", "convert", {"compute-hw": 1})
     pipeline.add("nvvideoconvert", "convert2", {"compute-hw": 1})
     pipeline.add("nvvideoconvert", "convert3", {"compute-hw": 1})
-    pipeline.add("nvdsanalytics", "nvdsanalytics",{"config-file": CONFIG_NVDSANALYTICS_FILE_PATH})
+    pipeline.add("nvdsanalytics", "nvdsanalytics",{"config-file": stream_analytics_config})
     if DISABLE_SOM_OVERLAY:
         pipeline.add("queue", "nvdsosd")
     else:
@@ -551,6 +554,10 @@ def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshol
     '''
 
     print(f"====================Pipeline finished====================")
+    try:
+        os.unlink(stream_analytics_config)
+    except Exception:
+        pass
     time.sleep(1)
 
 

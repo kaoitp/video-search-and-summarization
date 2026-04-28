@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CV Event Detector</title>
+<style>
+:root {
+  --bg:      #0d0d1a;
+  --surface: #12122a;
+  --panel:   #181832;
+  --border:  #2a2a50;
+  --text:    #d0d0e8;
+  --muted:   #7070a0;
+  --blue:    #4a7fff;
+  --blue-h:  #2255dd;
+  --green:   #2ecc71;
+  --red:     #e74c3c;
+  --yellow:  #f39c12;
+  --accent:  #00ff88;
+  --mono:    'Courier New', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+
+/* Header */
+header {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 10px 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+}
+header h1 { font-size: 1rem; white-space: nowrap; }
+.status-bar { display: flex; gap: 14px; flex: 1; flex-wrap: wrap; font-size: 0.8rem; align-items: center; }
+.s-item { display: flex; align-items: center; gap: 5px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+.dot.green { background: var(--green); }
+.dot.red   { background: var(--red); }
+#hw-bar { font-family: var(--mono); font-size: 0.72rem; color: var(--accent); }
+.icon-btn { background: none; border: none; cursor: pointer; color: var(--muted); padding: 2px 5px; }
+.icon-btn:hover { color: var(--text); }
+
+/* Tabs */
+.tab-bar { background: var(--surface); border-bottom: 1px solid var(--border); display: flex; padding: 0 12px; }
+.tab-btn { background: none; border: none; cursor: pointer; color: var(--muted);
+           padding: 10px 18px; font-size: 0.9rem; border-bottom: 3px solid transparent; }
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--blue); border-bottom-color: var(--blue); }
+
+/* Tab panes */
+.tab-pane { display: none; padding: 18px 20px; }
+.tab-pane.active { display: block; }
+
+/* Cards */
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+        padding: 14px; margin-bottom: 14px; }
+.card-title { font-size: 0.78rem; color: var(--muted); text-transform: uppercase;
+              letter-spacing: .05em; margin-bottom: 10px; }
+
+/* Grid */
+.g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.g3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+.g4 { display: grid; grid-template-columns: repeat(4,1fr); gap: 8px; }
+@media(max-width:900px) { .g2,.g3,.g4 { grid-template-columns: 1fr; } }
+
+/* Forms */
+label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 3px; }
+input[type=text], input[type=number], textarea, select {
+  width: 100%; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); padding: 6px 9px; font-size: 0.875rem; outline: none;
+}
+input:focus, textarea:focus, select:focus { border-color: var(--blue); }
+textarea { resize: vertical; font-family: var(--mono); }
+input[type=range] { width: 100%; accent-color: var(--blue); }
+.field { margin-bottom: 9px; }
+.frow { display: flex; align-items: center; gap: 8px; }
+.frow label { margin-bottom: 0; white-space: nowrap; }
+select option { background: var(--surface); }
+input[type=checkbox] { accent-color: var(--blue); width: 14px; height: 14px; cursor: pointer; }
+.chk { display: flex; align-items: center; gap: 7px; cursor: pointer; font-size: 0.875rem; }
+
+/* Buttons */
+.btn { padding: 7px 15px; border-radius: 5px; border: none; cursor: pointer;
+       font-size: 0.875rem; font-weight: 500; }
+.btn-primary  { background: var(--blue); color: #fff; }
+.btn-primary:hover  { background: var(--blue-h); }
+.btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+.btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+.btn-secondary:hover { border-color: var(--blue); color: var(--blue); }
+.btn-danger { background: #3a0e0e; color: var(--red); border: 1px solid #5a1e1e; }
+.btn-danger:hover { background: #5a1e1e; }
+.btn-sm { padding: 3px 9px; font-size: 0.78rem; }
+
+/* Tables */
+.tbl-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+th { background: var(--surface); padding: 7px 9px; text-align: left; color: var(--muted);
+     font-weight: 500; white-space: nowrap; }
+td { padding: 6px 9px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(74,127,255,.04); }
+
+/* Stream input table */
+#st-body input {
+  padding: 3px 5px; font-size: 0.78rem; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 3px; color: var(--text); width: 100%;
+}
+#st-body input:focus { border-color: var(--blue); outline: none; }
+.c-url  { min-width: 200px; }
+.c-name { min-width: 90px; }
+.c-sid  { min-width: 80px; }
+.c-z    { min-width: 58px; }
+
+/* Badges */
+.badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 0.74rem; }
+.b-green  { background: rgba(46,204,113,.15);  color: var(--green); }
+.b-red    { background: rgba(231,76,60,.15);   color: var(--red); }
+.b-yellow { background: rgba(243,156,18,.15);  color: var(--yellow); }
+.b-blue   { background: rgba(74,127,255,.15);  color: var(--blue); }
+
+/* Log area */
+.log {
+  font-family: var(--mono); font-size: 0.78rem; background: #080814;
+  border: 1px solid var(--border); border-radius: 5px; padding: 10px;
+  min-height: 60px; max-height: 280px; overflow-y: auto; white-space: pre-wrap; color: #aac8ff;
+}
+
+/* Util */
+hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.ml-a { margin-left: auto; }
+.mt { margin-top: 10px; }
+.muted { color: var(--muted); font-size: 0.78rem; }
+code { font-family: var(--mono); font-size: 0.8rem; }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header>
+  <h1>🎯 CV Event Detector</h1>
+  <div class="status-bar">
+    <div class="s-item"><span class="dot" id="dot-cv"></span><span id="lbl-cv">CV: …</span></div>
+    <div class="s-item"><span class="dot" id="dot-ab"></span><span id="lbl-ab">Alert-Bridge: …</span></div>
+    <div class="s-item" id="watcher-row" style="display:none"><span>🤖</span><span id="lbl-wt"></span></div>
+  </div>
+  <button class="icon-btn" onclick="refreshHealth()">⟳</button>
+  <div id="hw-bar">GPU: …</div>
+  <button class="icon-btn" onclick="refreshHardware()">⟳</button>
+</header>
+
+<!-- TABS -->
+<nav class="tab-bar">
+  <button class="tab-btn active" data-tab="pipelines">⚙️ Pipeline</button>
+  <button class="tab-btn" data-tab="streams">📷 เพิ่ม Streams</button>
+  <button class="tab-btn" data-tab="manage">📋 จัดการ Stream</button>
+  <button class="tab-btn" data-tab="review">📤 Manual Review</button>
+</nav>
+
+<!-- TAB: PIPELINES -->
+<div class="tab-pane active" id="tab-pipelines">
+  <div class="g2">
+    <div class="card">
+      <div class="card-title">สร้าง Pipeline ใหม่</div>
+      <div class="field"><label>ชื่อ Pipeline</label><input type="text" id="p-name" value="cv-pipeline"></div>
+      <div class="field"><label>ประเภท (type)</label><input type="text" id="p-type" value="object_detection"></div>
+      <div class="field"><label>Alert Bridge URL</label><input type="text" id="p-endpoint" placeholder="http://…:9080"></div>
+      <div class="g2">
+        <div class="field"><label>Min Clip (วิ)</label><input type="number" id="p-minclip" value="5" min="1"></div>
+        <div class="field"><label>Max Clip (วิ)</label><input type="number" id="p-maxclip" value="60" min="1"></div>
+      </div>
+      <div class="g2">
+        <div class="field">
+          <label>Frame Skip: <span id="p-fs-v">0</span></label>
+          <input type="range" id="p-fskip" min="0" max="10" value="0"
+                 oninput="p_fs_v.textContent=this.value">
+        </div>
+        <div class="field">
+          <label>Min Objects: <span id="p-md-v">3</span></label>
+          <input type="range" id="p-mindet" min="1" max="50" value="3"
+                 oninput="p_md_v.textContent=this.value">
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="createPipeline()">➕ สร้าง Pipeline</button>
+      <div class="log mt" id="p-log" style="min-height:36px"></div>
+    </div>
+    <div class="card">
+      <div class="row" style="margin-bottom:10px">
+        <div class="card-title" style="margin:0">Pipeline ที่มีอยู่</div>
+        <button class="btn btn-secondary btn-sm ml-a" onclick="loadPipelines()">🔄</button>
+      </div>
+      <div class="tbl-wrap">
+        <table><thead><tr><th>ชื่อ</th><th>ID</th><th>Created</th><th></th></tr></thead>
+        <tbody id="p-tbody"></tbody></table>
+      </div>
+      <div id="p-del-msg" class="muted mt"></div>
+    </div>
+  </div>
+</div>
+
+<!-- TAB: ADD STREAMS -->
+<div class="tab-pane" id="tab-streams">
+  <div class="card">
+    <div class="row">
+      <div class="card-title" style="margin:0">Pipeline</div>
+      <select id="s-pipeline" style="width:auto;min-width:260px">
+        <option value="">— เลือก Pipeline —</option>
+      </select>
+      <button class="btn btn-secondary btn-sm" onclick="loadPipelineSelect()">🔄</button>
+    </div>
+  </div>
+  <div class="g2">
+    <div>
+      <div class="card">
+        <div class="card-title">📷 Streams (Zone W=0 หรือ H=0 = ใช้ทั้งภาพ)</div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr>
+              <th class="c-url">Stream URL</th><th class="c-name">Name</th>
+              <th class="c-sid">Sensor ID</th>
+              <th class="c-z">Zone X</th><th class="c-z">Zone Y</th>
+              <th class="c-z">Zone W</th><th class="c-z">Zone H</th><th></th>
+            </tr></thead>
+            <tbody id="st-body"></tbody>
+          </table>
+        </div>
+        <button class="btn btn-secondary btn-sm mt" onclick="addStreamRow()">＋ เพิ่มแถว</button>
+      </div>
+      <div class="card">
+        <div class="card-title">🔍 CV Detection</div>
+        <div class="field">
+          <label>Detection Classes (หนึ่งบรรทัด = หนึ่งคลาส)</label>
+          <textarea id="s-classes" rows="3" placeholder="person&#10;car&#10;truck">person</textarea>
+        </div>
+        <div class="field">
+          <label>Box Threshold: <span id="s-thr-v">0.30</span></label>
+          <input type="range" id="s-thr" min="0.1" max="1.0" step="0.05" value="0.3"
+                 oninput="s_thr_v.textContent=parseFloat(this.value).toFixed(2)">
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <div class="card-title">🤖 Auto VLM Review</div>
+        <div class="field">
+          <label class="chk"><input type="checkbox" id="s-auto" checked>เปิด Auto-Review</label>
+        </div>
+        <div class="field">
+          <label>Poll Interval (วิ): <span id="s-poll-v">5</span></label>
+          <input type="range" id="s-poll" min="3" max="60" value="5"
+                 oninput="s_poll_v.textContent=this.value">
+        </div>
+        <div class="field"><label>VLM Prompt *</label>
+          <textarea id="s-prompt" rows="4" placeholder="Does the video show overcrowding?"></textarea>
+        </div>
+        <div class="field"><label>System Prompt (ไม่บังคับ)</label>
+          <textarea id="s-sysprompt" rows="2" placeholder="You are a safety monitoring system."></textarea>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">📋 Event & VSS</div>
+        <div class="g2">
+          <div class="field"><label>Event Type</label><input type="text" id="s-evtype" value="over_crowding"></div>
+          <div class="field"><label>Severity</label>
+            <select id="s-sev"><option>LOW</option><option selected>MEDIUM</option><option>HIGH</option><option>CRITICAL</option></select>
+          </div>
+        </div>
+        <div class="g2">
+          <div class="field"><label>Chunk Duration (วิ)</label><input type="number" id="s-chunk" value="60" min="1"></div>
+          <div class="field"><label>Frames/Chunk</label><input type="number" id="s-frames" value="8" min="1"></div>
+        </div>
+        <div class="row mt">
+          <label class="chk"><input type="checkbox" id="s-reason"> Enable Reasoning</label>
+          <label class="chk"><input type="checkbox" id="s-verify" checked> Do Verification</label>
+        </div>
+      </div>
+    </div>
+  </div>
+  <button class="btn btn-primary" id="btn-add" onclick="submitAddStreams()"
+          style="font-size:1rem;padding:9px 26px">➕ เพิ่ม Streams ทั้งหมด</button>
+  <div class="log mt" id="add-log"></div>
+</div>
+
+<!-- TAB: MANAGE -->
+<div class="tab-pane" id="tab-manage">
+  <div class="card">
+    <div class="row" style="margin-bottom:10px">
+      <div class="card-title" style="margin:0">Streams ทั้งหมด <span class="muted">(🤖 = มี Auto-Review)</span></div>
+      <button class="btn btn-secondary btn-sm ml-a" onclick="loadStreamsTable()">🔄</button>
+    </div>
+    <div class="tbl-wrap">
+      <table><thead><tr>
+        <th>Name</th><th>Stream ID</th><th>Pipeline</th><th>State</th><th>Timestamp</th><th>Auto</th><th>Actions</th>
+      </tr></thead>
+      <tbody id="m-tbody"></tbody></table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Output / Log</div>
+    <div id="m-target" class="muted" style="margin-bottom:6px">— เลือก action จากตารางด้านบน —</div>
+    <div class="log" id="m-log"></div>
+  </div>
+</div>
+
+<!-- TAB: REVIEW -->
+<div class="tab-pane" id="tab-review">
+  <div class="g2">
+    <div>
+      <div class="card">
+        <div class="card-title">📁 Clips</div>
+        <div class="frow" style="margin-bottom:10px">
+          <input type="text" id="r-folder" placeholder="/tmp/cv-output" style="flex:1">
+          <button class="btn btn-secondary btn-sm" onclick="scanClips()">🔍 สแกน</button>
+        </div>
+        <div id="r-scan-msg" class="muted" style="margin-bottom:8px"></div>
+        <div class="tbl-wrap" style="max-height:180px;overflow-y:auto">
+          <table><thead><tr><th>Clip</th><th>Folder</th></tr></thead>
+          <tbody id="r-tbody"></tbody></table>
+        </div>
+        <div class="field mt">
+          <label>เลือก Clip</label>
+          <select id="r-clip"><option value="">— เลือก —</option></select>
+        </div>
+        <div class="row mt">
+          <button class="btn btn-primary btn-sm" onclick="submitSelectedClip()">📤 ส่ง Clip ที่เลือก</button>
+          <button class="btn btn-secondary btn-sm" onclick="submitAllClips()">📤 ส่งทุก Clip</button>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <div class="card-title">🧠 VLM Settings</div>
+        <div class="field"><label>VLM Prompt *</label><textarea id="r-prompt" rows="4"></textarea></div>
+        <div class="field"><label>System Prompt</label><textarea id="r-sysprompt" rows="2"></textarea></div>
+        <div class="g2">
+          <div class="field"><label>Event Type</label><input type="text" id="r-evtype" value="over_crowding"></div>
+          <div class="field"><label>Severity</label>
+            <select id="r-sev"><option>LOW</option><option selected>MEDIUM</option><option>HIGH</option><option>CRITICAL</option></select>
+          </div>
+        </div>
+        <div class="g2">
+          <div class="field"><label>Sensor ID</label><input type="text" id="r-sensor" value="sensor-1"></div>
+          <div class="field"><label>Stream Name</label><input type="text" id="r-sname"></div>
+        </div>
+        <div class="g2">
+          <div class="field"><label>Chunk Duration (วิ)</label><input type="number" id="r-chunk" value="60" min="1"></div>
+          <div class="field"><label>Frames/Chunk</label><input type="number" id="r-frames" value="8" min="1"></div>
+        </div>
+        <div class="row mt">
+          <label class="chk"><input type="checkbox" id="r-reason"> Enable Reasoning</label>
+          <label class="chk"><input type="checkbox" id="r-verify" checked> Do Verification</label>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="log mt" id="r-log"></div>
+</div>
+
+<!-- ZONE MODAL -->
+<div id="zone-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.87);z-index:9999;align-items:center;justify-content:center;padding:20px;">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:16px;max-width:92vw;max-height:92vh;overflow:auto;display:flex;flex-direction:column;gap:12px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
+      <span style="font-weight:600;font-size:0.95rem;">🎯 ตีโซน Detection</span>
+      <button class="btn btn-secondary btn-sm" onclick="closeZoneModal()">✕ ปิด</button>
+    </div>
+    <div id="zone-loading" class="muted" style="font-size:0.82rem;text-align:center;padding:18px 0;">⏳ กำลังดึงภาพ…</div>
+    <div style="position:relative;display:inline-block;line-height:0;" id="zone-img-wrap">
+      <img id="zone-img" src="" alt="frame preview" style="max-width:80vw;max-height:62vh;display:block;border-radius:4px;user-select:none;">
+      <canvas id="zone-canvas" style="position:absolute;top:0;left:0;cursor:crosshair;"></canvas>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <code id="zone-coords" style="color:var(--accent);font-size:0.85rem;min-width:160px;">X:0  Y:0  W:0  H:0</code>
+      <button class="btn btn-primary btn-sm" onclick="applyZone()">✅ ยืนยัน Zone</button>
+      <button class="btn btn-secondary btn-sm" onclick="clearZone()">🗑️ ล้าง Zone</button>
+      <span class="muted" style="font-size:0.75rem;">ลากเพื่อวาดโซน</span>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── Core ──────────────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: {'Content-Type': 'application/json'} };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+  return data;
+}
+
+function setLog(id, msg, append) {
+  const el = document.getElementById(id);
+  if (append) el.textContent += msg + '\n';
+  else el.textContent = msg;
+  el.scrollTop = el.scrollHeight;
+}
+
+// ─── Tabs ──────────────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'manage') loadStreamsTable();
+  });
+});
+
+// ─── Pipeline name cache (localStorage) ───────────────────────────────────────
+const pNames = () => JSON.parse(localStorage.getItem('cvPNames') || '{}');
+function savePName(id, name) {
+  const n = pNames(); n[id] = name;
+  localStorage.setItem('cvPNames', JSON.stringify(n));
+}
+function getPName(id) { return pNames()[id] || ''; }
+
+// ─── Tab 1: Pipelines ─────────────────────────────────────────────────────────
+async function loadPipelines() {
+  try {
+    const d = await api('GET', '/cv/api/pipelines');
+    const tbody = document.getElementById('p-tbody');
+    tbody.innerHTML = '';
+    (d.pipelines || []).forEach(p => {
+      const name = getPName(p.id);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${name || '<span class="muted">—</span>'}</td>
+        <td><code title="${p.id}">${p.id.slice(0,12)}…</code></td>
+        <td class="muted">${(p.created_at||'').slice(0,19)}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="deletePipeline('${p.id}','${name}')">🗑️</button></td>`;
+      tbody.appendChild(tr);
+    });
+    updatePipelineSelect(d.pipelines || []);
+  } catch(e) { setLog('p-log', '❌ ' + e.message); }
+}
+
+async function createPipeline() {
+  const name = document.getElementById('p-name').value.trim();
+  if (!name) { setLog('p-log', '❌ กรุณาใส่ชื่อ'); return; }
+  const payload = {
+    name,
+    endpoint_url: document.getElementById('p-endpoint').value.trim() || null,
+    type: document.getElementById('p-type').value.trim(),
+    params: {
+      min_clip_duration: +document.getElementById('p-minclip').value,
+      max_clip_duration: +document.getElementById('p-maxclip').value,
+      frame_skip_interval: +document.getElementById('p-fskip').value,
+      minimum_detection_threshold: +document.getElementById('p-mindet').value,
+    }
+  };
+  try {
+    const d = await api('POST', '/cv/api/pipeline', payload);
+    savePName(d.id, name);
+    setLog('p-log', `✅ สร้างสำเร็จ\nID: ${d.id}`);
+    loadPipelines();
+  } catch(e) { setLog('p-log', '❌ ' + e.message); }
+}
+
+async function deletePipeline(id, name) {
+  if (!confirm(`ลบ Pipeline "${name || id}"?`)) return;
+  try {
+    await api('DELETE', '/cv/api/pipeline', { id, cleanup_resources: true });
+    const n = pNames(); delete n[id]; localStorage.setItem('cvPNames', JSON.stringify(n));
+    document.getElementById('p-del-msg').textContent = `✅ ลบสำเร็จ`;
+    loadPipelines();
+  } catch(e) { document.getElementById('p-del-msg').textContent = '❌ ' + e.message; }
+}
+
+// ─── Tab 2: Add Streams ───────────────────────────────────────────────────────
+function updatePipelineSelect(list) {
+  const sel = document.getElementById('s-pipeline');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— เลือก Pipeline —</option>';
+  list.forEach(p => {
+    const name = getPName(p.id);
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = name ? `${name} · ${p.id.slice(0,8)}…` : p.id.slice(0,14) + '…';
+    sel.appendChild(opt);
+  });
+  if (cur) sel.value = cur;
+}
+
+function loadPipelineSelect() {
+  api('GET', '/cv/api/pipelines').then(d => updatePipelineSelect(d.pipelines || [])).catch(() => {});
+}
+
+function addStreamRow(d = {}) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td class="c-url"><input type="text" placeholder="rtsp://… หรือ file:///…" value="${d.url||''}"></td>
+    <td class="c-name"><input type="text" placeholder="cam-1" value="${d.name||''}"></td>
+    <td class="c-sid"><input type="text" placeholder="sensor-1" value="${d.sid||''}"></td>
+    <td class="c-z"><input type="number" value="${d.zx||0}" min="0"></td>
+    <td class="c-z"><input type="number" value="${d.zy||0}" min="0"></td>
+    <td class="c-z"><input type="number" value="${d.zw||0}" min="0"></td>
+    <td class="c-z"><input type="number" value="${d.zh||0}" min="0"></td>
+    <td style="white-space:nowrap">
+      <button class="btn btn-secondary btn-sm" title="ดูภาพ + ตีโซน" onclick="openZonePreview(this)">🎯</button>
+      <button class="btn btn-danger btn-sm" onclick="this.closest('tr').remove()">✕</button>
+    </td>`;
+  document.getElementById('st-body').appendChild(tr);
+}
+
+function getStreamRows() {
+  return [...document.querySelectorAll('#st-body tr')].map(tr => {
+    const inp = tr.querySelectorAll('input');
+    return {
+      url: inp[0].value.trim(), name: inp[1].value.trim() || 'stream',
+      sensor_id: inp[2].value.trim() || 'sensor-1',
+      zone_x: +inp[3].value||0, zone_y: +inp[4].value||0,
+      zone_w: +inp[5].value||0, zone_h: +inp[6].value||0,
+    };
+  }).filter(r => r.url);
+}
+
+async function submitAddStreams() {
+  const pid = document.getElementById('s-pipeline').value;
+  if (!pid) { alert('กรุณาเลือก Pipeline ก่อน'); return; }
+  const streams = getStreamRows();
+  if (!streams.length) { alert('กรุณาใส่ Stream URL อย่างน้อย 1 รายการ'); return; }
+
+  const classes = document.getElementById('s-classes').value.trim().split('\n').map(c=>c.trim()).filter(Boolean);
+  const payload = {
+    pipeline_id: pid, streams,
+    cv_prompt: classes.length ? classes.join(' . ') : null,
+    box_threshold: +document.getElementById('s-thr').value,
+    watcher: {
+      enabled: document.getElementById('s-auto').checked,
+      prompt: document.getElementById('s-prompt').value.trim(),
+      system_prompt: document.getElementById('s-sysprompt').value.trim(),
+      event_type: document.getElementById('s-evtype').value.trim() || 'event',
+      severity: document.getElementById('s-sev').value,
+      chunk_duration: +document.getElementById('s-chunk').value,
+      num_frames: +document.getElementById('s-frames').value,
+      enable_reasoning: document.getElementById('s-reason').checked,
+      do_verification: document.getElementById('s-verify').checked,
+      poll_sec: +document.getElementById('s-poll').value,
+    }
+  };
+
+  const btn = document.getElementById('btn-add');
+  const log = document.getElementById('add-log');
+  btn.disabled = true;
+  log.textContent = '';
+
+  try {
+    const resp = await fetch('/api/add-streams', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const parts = buf.split('\n\n'); buf = parts.pop();
+      for (const part of parts) {
+        for (const line of part.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const d = JSON.parse(line.slice(6));
+            log.textContent += d.msg + '\n';
+            log.scrollTop = log.scrollHeight;
+          } catch {}
+        }
+      }
+    }
+  } catch(e) { log.textContent += '❌ ' + e.message + '\n'; }
+  finally { btn.disabled = false; }
+}
+
+// ─── Tab 3: Manage ────────────────────────────────────────────────────────────
+async function loadStreamsTable() {
+  try {
+    const [sd, wd] = await Promise.all([
+      api('GET', '/cv/api/streams'),
+      api('GET', '/api/watchers'),
+    ]);
+    const wids = new Set((wd.watchers || []).map(w => w.stream_id));
+    const tbody = document.getElementById('m-tbody');
+    tbody.innerHTML = '';
+    (sd.streams || []).forEach(s => {
+      const pname = getPName(s.pipeline_id);
+      const sc = {running:'b-green',completed:'b-blue',terminated:'b-red'}[s.processing_state] || 'b-yellow';
+      const hasW = wids.has(s.stream_id);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${s.stream_name||'—'}</td>
+        <td><code title="${s.stream_id}">${s.stream_id.slice(0,12)}…</code></td>
+        <td>${pname||s.pipeline_id.slice(0,8)+'…'}</td>
+        <td><span class="badge ${sc}">${s.processing_state}</span></td>
+        <td class="muted">${(s.timestamp||'').slice(0,19)}</td>
+        <td>${hasW?'🤖':''}</td>
+        <td style="white-space:nowrap;display:flex;gap:4px">
+          <button class="btn btn-danger btn-sm" onclick="stopStream('${s.stream_id}')">⏹️</button>
+          <button class="btn btn-secondary btn-sm" onclick="viewStatus('${s.stream_id}')">🔍</button>
+          ${hasW?`<button class="btn btn-secondary btn-sm" onclick="viewLog('${s.stream_id}')">📜</button>`:''}
+        </td>`;
+      tbody.appendChild(tr);
+    });
+  } catch(e) { setLog('m-log', '❌ ' + e.message); }
+}
+
+async function stopStream(id) {
+  if (!confirm(`หยุด stream ${id.slice(0,12)}…?`)) return;
+  document.getElementById('m-target').textContent = `⏹️ หยุด ${id.slice(0,12)}…`;
+  try {
+    await fetch('/api/watchers/' + id, {method:'DELETE'}).catch(() => {});
+    const d = await api('DELETE', '/cv/api/stream', { stream_id: id, version: '1.0' });
+    setLog('m-log', d.message || '✅ หยุดสำเร็จ');
+    loadStreamsTable();
+  } catch(e) { setLog('m-log', '❌ ' + e.message); }
+}
+
+async function viewStatus(id) {
+  document.getElementById('m-target').textContent = `🔍 สถานะ: ${id.slice(0,12)}…`;
+  try {
+    const d = await api('GET', `/cv/api/streams/${id}/status?timeout_ms=1000`);
+    setLog('m-log', JSON.stringify(d, null, 2));
+  } catch(e) { setLog('m-log', '❌ ' + e.message); }
+}
+
+async function viewLog(id) {
+  document.getElementById('m-target').textContent = `📜 Watcher log: ${id.slice(0,12)}…`;
+  try {
+    const d = await api('GET', '/api/watchers/' + id + '/log');
+    setLog('m-log', (d.log || []).join('\n') || '(ยังไม่มี log)');
+  } catch(e) { setLog('m-log', '❌ ' + e.message); }
+}
+
+// ─── Tab 4: Review ────────────────────────────────────────────────────────────
+let _clips = [];
+
+async function scanClips() {
+  const folder = document.getElementById('r-folder').value.trim();
+  document.getElementById('r-scan-msg').textContent = '⏳ กำลังสแกน…';
+  try {
+    const d = await api('GET', '/api/clips' + (folder ? `?folder=${encodeURIComponent(folder)}` : ''));
+    if (d.error) { document.getElementById('r-scan-msg').textContent = '❌ ' + d.error; return; }
+    _clips = d.clips || [];
+    const tbody = document.getElementById('r-tbody');
+    const sel = document.getElementById('r-clip');
+    tbody.innerHTML = '';
+    sel.innerHTML = '<option value="">— เลือก —</option>';
+    _clips.forEach(c => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${c.name}</td><td class="muted">${c.folder}</td>`;
+      tr.style.cursor = 'pointer';
+      tr.onclick = () => { sel.value = c.path; };
+      tbody.appendChild(tr);
+      const opt = document.createElement('option');
+      opt.value = c.path; opt.textContent = c.folder + '/' + c.name;
+      sel.appendChild(opt);
+    });
+    document.getElementById('r-scan-msg').textContent = `พบ ${_clips.length} clips`;
+  } catch(e) { document.getElementById('r-scan-msg').textContent = '❌ ' + e.message; }
+}
+
+function reviewPayload(path) {
+  return {
+    video_path: path,
+    prompt: document.getElementById('r-prompt').value.trim(),
+    system_prompt: document.getElementById('r-sysprompt').value.trim(),
+    event_type: document.getElementById('r-evtype').value.trim() || 'event',
+    severity: document.getElementById('r-sev').value,
+    sensor_id: document.getElementById('r-sensor').value.trim() || 'sensor-1',
+    stream_name: document.getElementById('r-sname').value.trim() || null,
+    chunk_duration: +document.getElementById('r-chunk').value,
+    num_frames: +document.getElementById('r-frames').value,
+    enable_reasoning: document.getElementById('r-reason').checked,
+    do_verification: document.getElementById('r-verify').checked,
+  };
+}
+
+async function submitSelectedClip() {
+  const path = document.getElementById('r-clip').value;
+  if (!path) { setLog('r-log', '❌ กรุณาเลือก clip'); return; }
+  if (!document.getElementById('r-prompt').value.trim()) { setLog('r-log', '❌ กรุณาใส่ VLM Prompt'); return; }
+  try {
+    const d = await api('POST', '/api/clips/submit', reviewPayload(path));
+    setLog('r-log', `${d.ok?'✅':'❌'} HTTP ${d.status}`);
+  } catch(e) { setLog('r-log', '❌ ' + e.message); }
+}
+
+async function submitAllClips() {
+  if (!document.getElementById('r-prompt').value.trim()) { setLog('r-log', '❌ กรุณาใส่ VLM Prompt'); return; }
+  if (!_clips.length) { setLog('r-log', '❌ กรุณาสแกน clips ก่อน'); return; }
+  setLog('r-log', `⏳ ส่ง ${_clips.length} clips…\n`);
+  let ok = 0, fail = 0;
+  for (const c of _clips) {
+    try {
+      const d = await api('POST', '/api/clips/submit', reviewPayload(c.path));
+      setLog('r-log', `${d.ok?'✅':'❌'} ${c.name} → HTTP ${d.status}`, true);
+      d.ok ? ok++ : fail++;
+    } catch(e) { setLog('r-log', `❌ ${c.name} → ${e.message}`, true); fail++; }
+  }
+  setLog('r-log', `\nสรุป: ✅ ${ok}  ❌ ${fail}`, true);
+}
+
+// ─── Status bar ───────────────────────────────────────────────────────────────
+async function refreshHealth() {
+  try {
+    const d = await api('GET', '/api/health');
+    const cvOk = d.cv_detector === 'healthy';
+    const abOk = d.alert_bridge !== 'error';
+    document.getElementById('dot-cv').className = 'dot ' + (cvOk ? 'green' : 'red');
+    document.getElementById('dot-ab').className = 'dot ' + (abOk ? 'green' : 'red');
+    document.getElementById('lbl-cv').textContent = 'CV: ' + d.cv_detector;
+    document.getElementById('lbl-ab').textContent = 'Alert-Bridge: ' + d.alert_bridge;
+    const wr = document.getElementById('watcher-row');
+    if (d.watchers > 0) {
+      wr.style.display = '';
+      document.getElementById('lbl-wt').textContent = d.watchers + ' watcher';
+    } else { wr.style.display = 'none'; }
+  } catch {}
+}
+
+async function refreshHardware() {
+  try {
+    const d = await api('GET', '/api/hardware');
+    if (!d.gpus?.length) { document.getElementById('hw-bar').textContent = d.error || 'GPU: N/A'; return; }
+    document.getElementById('hw-bar').textContent = d.gpus.map(g =>
+      `GPU${g.idx}[${g.name}] ${g.mu}/${g.mt}MB(${g.pct}%) util:${g.util}% ${g.temp}°C`
+    ).join('  |  ');
+  } catch {}
+}
+
+// ─── Zone Preview ─────────────────────────────────────────────────────────────
+let _zoneModal = {
+  row: null,
+  rect: { x: 0, y: 0, w: 0, h: 0 },
+  drawing: false,
+  startX: 0, startY: 0,
+};
+
+async function openZonePreview(btn) {
+  const tr = btn.closest('tr');
+  const inp = tr.querySelectorAll('input');
+  const url = inp[0].value.trim();
+  if (!url) { alert('กรุณาใส่ Stream URL ก่อน'); return; }
+
+  _zoneModal.row = tr;
+  _zoneModal.rect = {
+    x: +inp[3].value || 0, y: +inp[4].value || 0,
+    w: +inp[5].value || 0, h: +inp[6].value || 0,
+  };
+
+  const modal = document.getElementById('zone-modal');
+  const loading = document.getElementById('zone-loading');
+  const img = document.getElementById('zone-img');
+  const wrap = document.getElementById('zone-img-wrap');
+  modal.style.display = 'flex';
+  loading.style.display = '';
+  wrap.style.display = 'none';
+  loading.textContent = '⏳ กำลังดึงภาพ…';
+
+  try {
+    const d = await api('POST', '/api/capture-frame', { url });
+    if (d.error) { loading.textContent = '❌ ' + d.error; return; }
+    img.onload = () => {
+      loading.style.display = 'none';
+      wrap.style.display = '';
+      requestAnimationFrame(setupZoneCanvas);
+    };
+    img.src = d.image;
+  } catch(e) { loading.textContent = '❌ ' + e.message; }
+}
+
+function setupZoneCanvas() {
+  const img = document.getElementById('zone-img');
+  const canvas = document.getElementById('zone-canvas');
+  canvas.width  = img.clientWidth;
+  canvas.height = img.clientHeight;
+  canvas.style.width  = img.clientWidth  + 'px';
+  canvas.style.height = img.clientHeight + 'px';
+  drawZoneOnCanvas();
+}
+
+function drawZoneOnCanvas() {
+  const canvas = document.getElementById('zone-canvas');
+  const img    = document.getElementById('zone-img');
+  const ctx = canvas.getContext('2d');
+  const cw = canvas.width, ch = canvas.height;
+  ctx.clearRect(0, 0, cw, ch);
+
+  const r = _zoneModal.rect;
+  if (r.w <= 0 || r.h <= 0) { updateZoneDisplay(); return; }
+
+  const sx = cw / (img.naturalWidth  || cw);
+  const sy = ch / (img.naturalHeight || ch);
+  const rx = r.x * sx, ry = r.y * sy, rw = r.w * sx, rh = r.h * sy;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.50)';
+  ctx.fillRect(0, 0, cw, ch);
+  ctx.clearRect(rx, ry, rw, rh);
+
+  ctx.strokeStyle = '#00ff88';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(rx, ry, rw, rh);
+
+  ctx.fillStyle = '#00ff88';
+  [[rx, ry], [rx+rw, ry], [rx, ry+rh], [rx+rw, ry+rh]].forEach(([px, py]) => {
+    ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI*2); ctx.fill();
+  });
+
+  ctx.fillStyle = '#00ff88';
+  ctx.font = '12px monospace';
+  ctx.fillText(`${r.x},${r.y}  ${r.w}×${r.h}`, rx + 4, ry > 18 ? ry - 5 : ry + 16);
+
+  updateZoneDisplay();
+}
+
+function updateZoneDisplay() {
+  const r = _zoneModal.rect;
+  document.getElementById('zone-coords').textContent = `X:${r.x}  Y:${r.y}  W:${r.w}  H:${r.h}`;
+}
+
+function initZoneCanvas() {
+  const canvas = document.getElementById('zone-canvas');
+
+  function pos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const src  = e.touches ? e.touches[0] : e;
+    return { x: src.clientX - rect.left, y: src.clientY - rect.top };
+  }
+
+  canvas.addEventListener('mousedown', e => {
+    e.preventDefault();
+    const p = pos(e);
+    _zoneModal.drawing = true;
+    _zoneModal.startX = p.x; _zoneModal.startY = p.y;
+    _zoneModal.rect = { x: 0, y: 0, w: 0, h: 0 };
+  });
+
+  canvas.addEventListener('mousemove', e => {
+    if (!_zoneModal.drawing) return;
+    e.preventDefault();
+    const p  = pos(e);
+    const img = document.getElementById('zone-img');
+    const sx  = (img.naturalWidth  || canvas.width)  / canvas.width;
+    const sy  = (img.naturalHeight || canvas.height) / canvas.height;
+    const x0  = Math.min(_zoneModal.startX, p.x);
+    const y0  = Math.min(_zoneModal.startY, p.y);
+    const x1  = Math.max(_zoneModal.startX, p.x);
+    const y1  = Math.max(_zoneModal.startY, p.y);
+    _zoneModal.rect = {
+      x: Math.round(x0 * sx), y: Math.round(y0 * sy),
+      w: Math.round((x1 - x0) * sx), h: Math.round((y1 - y0) * sy),
+    };
+    drawZoneOnCanvas();
+  });
+
+  const endDraw = e => { if (_zoneModal.drawing) { e.preventDefault(); _zoneModal.drawing = false; } };
+  canvas.addEventListener('mouseup',    endDraw);
+  canvas.addEventListener('mouseleave', endDraw);
+  canvas.addEventListener('touchstart', e => { e.preventDefault(); const p = pos(e); _zoneModal.drawing = true; _zoneModal.startX = p.x; _zoneModal.startY = p.y; _zoneModal.rect = {x:0,y:0,w:0,h:0}; }, {passive:false});
+  canvas.addEventListener('touchmove',  e => { if (!_zoneModal.drawing) return; e.preventDefault(); const p = pos(e); const img = document.getElementById('zone-img'); const sx = (img.naturalWidth||canvas.width)/canvas.width; const sy = (img.naturalHeight||canvas.height)/canvas.height; const x0=Math.min(_zoneModal.startX,p.x),y0=Math.min(_zoneModal.startY,p.y),x1=Math.max(_zoneModal.startX,p.x),y1=Math.max(_zoneModal.startY,p.y); _zoneModal.rect={x:Math.round(x0*sx),y:Math.round(y0*sy),w:Math.round((x1-x0)*sx),h:Math.round((y1-y0)*sy)}; drawZoneOnCanvas(); }, {passive:false});
+  canvas.addEventListener('touchend',   e => { if (_zoneModal.drawing) { e.preventDefault(); _zoneModal.drawing = false; } }, {passive:false});
+}
+
+function applyZone() {
+  const tr = _zoneModal.row;
+  if (!tr) return;
+  const inp = tr.querySelectorAll('input');
+  const r   = _zoneModal.rect;
+  inp[3].value = r.x; inp[4].value = r.y;
+  inp[5].value = r.w; inp[6].value = r.h;
+  closeZoneModal();
+}
+
+function clearZone() {
+  _zoneModal.rect = { x: 0, y: 0, w: 0, h: 0 };
+  drawZoneOnCanvas();
+}
+
+function closeZoneModal() {
+  document.getElementById('zone-modal').style.display = 'none';
+  _zoneModal.row = null;
+  _zoneModal.drawing = false;
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  addStreamRow({name:'cam-1', sid:'sensor-1'});
+  addStreamRow({name:'cam-2', sid:'sensor-2'});
+  addStreamRow({name:'cam-3', sid:'sensor-3'});
+
+  api('GET', '/api/config').then(d => {
+    if (d.default_output_folder) document.getElementById('r-folder').value = d.default_output_folder;
+    if (d.alertbridge_url) document.getElementById('p-endpoint').value = d.alertbridge_url;
+  }).catch(() => {});
+
+  initZoneCanvas();
+  loadPipelines();
+  loadStreamsTable();
+  refreshHealth();
+  refreshHardware();
+
+  setInterval(refreshHealth,   30000);
+  setInterval(refreshHardware, 10000);
+  setInterval(loadStreamsTable, 15000);
+  setInterval(loadPipelines,   60000);
+});
+</script>
+</body>
+</html>

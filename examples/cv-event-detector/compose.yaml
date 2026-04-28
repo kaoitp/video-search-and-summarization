@@ -79,6 +79,7 @@ services:
       - FILTERED_CLIP_PATH=${ALERT_REVIEW_MEDIA_BASE_DIR?}
       - NV_SERIALIZE_ALERT_VERIFICATION=${NV_SERIALIZE_ALERT_VERIFICATION:-false}
       - VLM_MODEL=${VLM_MODEL:-cosmos-reason2}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
     runtime: nvidia
     ports:
       - 7862:7862

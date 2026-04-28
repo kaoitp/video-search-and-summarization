@@ -152,11 +152,13 @@ services:
       - BACKEND_PORT=${VSS_BACKEND_PORT:-8000}
       - GRADIO_SERVER=0.0.0.0
       - ALERT_BRIDGE_BASE_URL=ws://alert-bridge:9080
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
     ports:
       - 7860:7860
       - 8500:8500
     stdin_open: true
     tty: true
+    runtime: nvidia
     depends_on:
       alert-bridge:
         condition: service_healthy
