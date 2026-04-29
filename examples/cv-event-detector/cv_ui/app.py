@@ -148,10 +148,33 @@ async def capture_frame(request: Request):
 # ── Live MJPEG stream ─────────────────────────────────────────────────────────
 
 @app.get("/api/stream-live")
-async def stream_live(url: str = ""):
-    if not url:
-        raise HTTPException(400, "url required")
+async def stream_live(url: str = "", stream_id: str = ""):
+    if not url and not stream_id:
+        raise HTTPException(400, "url or stream_id required")
 
+    # OSD mode: poll live JPEG frames (with bounding boxes) from cv-event-detector pipeline
+    if stream_id:
+        async def generate_osd():
+            while True:
+                try:
+                    async with httpx.AsyncClient(timeout=3.0) as client:
+                        r = await client.get(f"{CV_API_URL}/api/live-frame/{stream_id}")
+                        if r.status_code == 200 and r.content:
+                            yield (
+                                b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                                + r.content + b"\r\n"
+                            )
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)  # 2 fps polling rate
+
+        return StreamingResponse(
+            generate_osd(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # URL mode: transcode via ffmpeg (original RTSP, no OSD)
     async def generate():
         cmd = ["ffmpeg", "-y"]
         if url.startswith("rtsp://"):

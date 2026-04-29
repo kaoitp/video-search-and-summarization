@@ -43,6 +43,8 @@ architecture = sysconfig.get_platform()
 asset_map = {}
 # Global storage for pipelines
 pipeline_map = {}
+# stream_id → /tmp/cv_live_XXXXXXXX directory for live JPEG frames (with OSD)
+live_frame_paths: dict = {}
 
 PIPELINE_NAME = "deepstream-test1"
 
@@ -280,6 +282,7 @@ def update_infer_config_threshold(config_file_path: str, threshold_value: float,
     # Find the [class-attrs-all] section and add/update threshold
     class_attrs_all_found = False
     threshold_updated = False
+    frame_skip_interval_updated = False
 
     for i, line in enumerate(lines):
         # Additional safety check for loop bounds
@@ -423,7 +426,7 @@ class ObjectCounterMarker(BatchMetadataOperator):
             frame_meta.append(display_meta)
             '''
 
-def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshold:float, gdino_rois:List[List[int]], frame_skip_interval:int, object_detection_threshold=3,streamname:str=None, vss_server_url:str=None):
+def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshold:float, gdino_rois:List[List[int]], frame_skip_interval:int, object_detection_threshold=3,streamname:str=None, vss_server_url:str=None, live_frame_dir:str=None):
 
     # update the config file with the new prompt if it exists else use
     # the default prompt
@@ -525,9 +528,32 @@ def cveventrecorder(file_path, gdinoprompt:str, output_folder:str, gdinothreshol
     else:
         pipeline.add("fakesink", "sink", {"sync": True if ENABLE_FILE_STREAMING_MODE else False, "qos": False}) #qos default is false
 
+    if live_frame_dir:
+        os.makedirs(live_frame_dir, exist_ok=True)
+        pipeline.add("tee", "tee_live")
+        pipeline.add("queue", "q_live")
+        pipeline.add("nvvideoconvert", "conv_live", {"compute-hw": 1})
+        pipeline.add("videoconvert", "vconv_live")
+        pipeline.add("jpegenc", "jpeg_live", {"quality": 40})
+        pipeline.add("multifilesink", "live_sink", {
+            "location": os.path.join(live_frame_dir, "f%05d.jpg"),
+            "max-files": 3,
+            "index": 0,
+            "next-file": 0,
+            "async": False,
+            "sync": False,
+        })
+        print(f"Live view enabled: {live_frame_dir}")
+
     pipeline.link(("decbin", "mux"), ("", "sink_%u"))
-    pipeline.link("mux", "inferserver", "queue1", "tracker", "queue2", "convert",
-     "nvdsanalytics", "convert2" , "nvdsosd", "convert3", "queue3","eventgenerator", "queue4", "cacheevent", "sink")
+    if live_frame_dir:
+        pipeline.link("mux", "inferserver", "queue1", "tracker", "queue2", "convert",
+            "nvdsanalytics", "convert2", "nvdsosd", "tee_live")
+        pipeline.link("tee_live", "convert3", "queue3", "eventgenerator", "queue4", "cacheevent", "sink")
+        pipeline.link("tee_live", "q_live", "conv_live", "vconv_live", "jpeg_live", "live_sink")
+    else:
+        pipeline.link("mux", "inferserver", "queue1", "tracker", "queue2", "convert",
+         "nvdsanalytics", "convert2" , "nvdsosd", "convert3", "queue3","eventgenerator", "queue4", "cacheevent", "sink")
     pipeline.start().wait()
     # Read info.txt file and populate events list
     '''
@@ -806,7 +832,7 @@ async def add_stream(request: AddStreamRequest, response: Response):
         print (f"#########request.cv_params: {request.cv_params}")
         print(f"#########gdinoprompt: {gdinoprompt}")
         print(f"#########gdinothreshold: {gdinothreshold}")
-        gdino_rois = request.cv_params.gdino_rois if request.cv_params else None
+        gdino_rois = (request.cv_params.gdino_rois if request.cv_params else None) or [[]]
         print(f"#########gdino_rois: {gdino_rois[0]}")
         print(f"#########gdino_rois length : {len(gdino_rois)}")
 
@@ -814,6 +840,9 @@ async def add_stream(request: AddStreamRequest, response: Response):
         global asset_map
         while asset_id in asset_map:
             asset_id = str(uuid.uuid4())
+
+        live_frame_dir = f"/tmp/cv_live_{asset_id[:8]}"
+        live_frame_paths[asset_id] = live_frame_dir
 
         stream_info = StreamInfo()
         stream_info.stream_id = asset_id
@@ -834,7 +863,8 @@ async def add_stream(request: AddStreamRequest, response: Response):
                                                                         pipeline_config.params.frame_skip_interval,
                                                                         pipeline_config.params.minimum_detection_threshold,
                                                                         request.stream_name+"_"+str(stream_info.timestamp),
-                                                                        pipeline_config.endpoint_url))
+                                                                        pipeline_config.endpoint_url,
+                                                                        live_frame_dir))
         stream_info.processing_state = "enabled"
         stream_info.process = process
         asset_map[asset_id] = stream_info
@@ -928,6 +958,10 @@ async def delete_stream(request: RemoveStreamRequest):
 
             asset_map.pop(streamid)
 
+            if streamid in live_frame_paths:
+                d = live_frame_paths.pop(streamid)
+                shutil.rmtree(d, ignore_errors=True)
+
             return RemoveStreamResponse(stream_id=streamid,
                                         status="success",
                                         message="Stream removed successfully",
@@ -943,6 +977,31 @@ async def delete_stream(request: RemoveStreamRequest):
                                         error_details=f"Stream {streamid} does not exist")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error in removing stream: {str(e)}")
+
+@app.get("/api/live-frame/{stream_id}")
+async def get_live_frame(stream_id: str):
+    """Return latest JPEG frame (with OSD overlay) from the DeepStream pipeline."""
+    d = live_frame_paths.get(stream_id)
+    if d is None:
+        raise HTTPException(404, "Stream not found")
+    if not os.path.isdir(d):
+        raise HTTPException(503, "Frame not yet available — pipeline starting up")
+    try:
+        files = sorted(f for f in os.listdir(d) if f.endswith(".jpg"))
+        if not files:
+            raise HTTPException(503, "Frame not yet available — pipeline starting up")
+        latest = os.path.join(d, files[-1])
+        with open(latest, "rb") as f:
+            data = f.read()
+        if not data:
+            raise HTTPException(503, "Frame empty")
+        return Response(content=data, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(503, f"Error reading frame: {e}")
+
 
 @app.post("/api/pipeline", response_model=CreatePipelineResponse)
 async def create_pipeline(request: CreatePipelineRequest):

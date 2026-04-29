@@ -373,7 +373,12 @@ code { font-family: var(--mono); font-size: 0.8rem; }
       <span style="font-weight:600;font-size:0.95rem;">📹 Live View — <span id="live-title" style="color:var(--accent)"></span></span>
       <button class="btn btn-secondary btn-sm" onclick="closeLiveModal()">✕ ปิด</button>
     </div>
-    <div style="display:flex;gap:8px;align-items:center;">
+    <div id="live-osd-bar" style="display:none;align-items:center;gap:8px;padding:6px 10px;background:rgba(0,255,136,0.08);border:1px solid rgba(0,255,136,0.25);border-radius:5px;font-size:0.8rem;">
+      <span style="color:var(--accent)">🎯 Pipeline OSD</span>
+      <span class="muted">— แสดง bounding box จาก DeepStream pipeline โดยตรง</span>
+      <button class="btn btn-secondary btn-sm ml-a" onclick="switchToUrlMode()">เปลี่ยนเป็น RTSP URL</button>
+    </div>
+    <div id="live-url-bar" style="display:flex;gap:8px;align-items:center;">
       <input type="text" id="live-url-input" placeholder="rtsp://… หรือ http://…" style="flex:1;font-size:0.82rem;font-family:var(--mono)">
       <button class="btn btn-primary btn-sm" onclick="startLiveStream()">▶️ เล่น</button>
     </div>
@@ -553,7 +558,7 @@ async function submitAddStreams() {
   const classes = document.getElementById('s-classes').value.trim().split('\n').map(c=>c.trim()).filter(Boolean);
   const payload = {
     pipeline_id: pid, streams,
-    cv_prompt: classes.length ? classes.join(' . ') : null,
+    cv_prompt: classes.length ? classes.join(' . ') + ' .' : null,
     box_threshold: +document.getElementById('s-thr').value,
     watcher: {
       enabled: document.getElementById('s-auto').checked,
@@ -632,7 +637,7 @@ async function loadStreamsTable() {
         <td>${hasW?'🤖':''}</td>
         <td style="white-space:nowrap;display:flex;gap:4px">
           <button class="btn btn-danger btn-sm" onclick="stopStream('${s.stream_id}')">⏹️</button>
-          <button class="btn btn-secondary btn-sm" title="Live View" onclick="openLiveView('${sName}')">📹</button>
+          <button class="btn btn-secondary btn-sm" title="Live View (OSD)" onclick="openLiveView('${sName}','${s.stream_id}')">📹</button>
           <button class="btn btn-secondary btn-sm" onclick="viewStatus('${s.stream_id}')">🔍</button>
           ${hasW?`<button class="btn btn-secondary btn-sm" onclick="viewLog('${s.stream_id}')">📜</button>`:''}
         </td>`;
@@ -814,7 +819,10 @@ function saveStreamUrl(name, url) {
 function getStreamUrl(name) { return _sUrls()[name] || ''; }
 
 // ─── Live View Modal ──────────────────────────────────────────────────────────
-function openLiveView(streamName) {
+let _liveStreamId = '';
+
+function openLiveView(streamName, streamId) {
+  _liveStreamId = streamId || '';
   document.getElementById('live-title').textContent = streamName;
   document.getElementById('live-url-input').value = getStreamUrl(streamName);
   const img = document.getElementById('live-img');
@@ -823,6 +831,43 @@ function openLiveView(streamName) {
   document.getElementById('live-placeholder').style.display = '';
   document.getElementById('live-error').style.display = 'none';
   document.getElementById('live-modal').style.display = 'flex';
+
+  if (streamId) {
+    // Auto-start OSD mode from pipeline
+    document.getElementById('live-osd-bar').style.display = 'flex';
+    document.getElementById('live-url-bar').style.display = 'none';
+    _startOsdStream(streamId);
+  } else {
+    document.getElementById('live-osd-bar').style.display = 'none';
+    document.getElementById('live-url-bar').style.display = 'flex';
+  }
+}
+
+function _startOsdStream(streamId) {
+  const img = document.getElementById('live-img');
+  const ph = document.getElementById('live-placeholder');
+  const err = document.getElementById('live-error');
+  err.style.display = 'none';
+  ph.style.display = 'none';
+  img.style.display = 'block';
+  img.src = `/api/stream-live?stream_id=${encodeURIComponent(streamId)}`;
+  img.onerror = () => {
+    err.textContent = '⚠️ ยังไม่มีภาพ — pipeline อาจกำลังเริ่มต้น (รอ 10-20 วิ) หรือกด "เปลี่ยนเป็น RTSP URL" เพื่อดูแบบ raw';
+    err.style.display = '';
+    img.style.display = 'none';
+    ph.style.display = '';
+  };
+}
+
+function switchToUrlMode() {
+  _liveStreamId = '';
+  document.getElementById('live-osd-bar').style.display = 'none';
+  document.getElementById('live-url-bar').style.display = 'flex';
+  const img = document.getElementById('live-img');
+  img.src = '';
+  img.style.display = 'none';
+  document.getElementById('live-placeholder').style.display = '';
+  document.getElementById('live-error').style.display = 'none';
 }
 
 function startLiveStream() {

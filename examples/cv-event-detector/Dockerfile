@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM nvcr.io/nvidia/blueprint/nv-cv-event-detector:2.4.0
+ARG BASE_IMAGE=nvcr.io/nvidia/blueprint/nv-cv-event-detector:2.4.0-sbsa
+FROM ${BASE_IMAGE}
 
 RUN rm /opt/nvidia/nv-cv-event-detector/*.py
 RUN rm /opt/nvidia/nv-cv-event-detector/*.sh
@@ -22,6 +23,7 @@ COPY *.py /opt/nvidia/nv-cv-event-detector/
 COPY gst-plugins/python/*.py /opt/nvidia/deepstream/deepstream/service-maker/gst-plugins/python/
 COPY *.txt /opt/nvidia/nv-cv-event-detector/
 COPY *.sh /opt/nvidia/nv-cv-event-detector/
+RUN chmod +x /opt/nvidia/nv-cv-event-detector/*.sh
 COPY via_tracker_config_fast.yml /opt/nvidia/nv-cv-event-detector/
 
 WORKDIR /opt/nvidia/nv-cv-event-detector/
